@@ -89,8 +89,8 @@ daemon/
 
 ### Option A — install from the npm registry, mount as a composition row
 
-1. Install the package where the dsh deployment can resolve it (a globally
-   installed `dsh` resolves the global `node_modules`):
+1. Install the package (globally is fine; the loader resolves the profile's
+   `node_modules` first, then falls through to the global tree):
 
    ```bash
    npm install -g @chenkai114/dsh-daemon
@@ -99,7 +99,17 @@ daemon/
    (alternative: install straight from the repository —
    `npm install -g github:chenkai2/dsh-daemon`)
 
-2. Add a loader patch entry to the web profile so the plugin mounts at the
+2. Make the package resolvable **from the profile directory** — the loader
+   imports `name:` rows relative to `~/.dsh/profiles/web/`, so the package
+   must be reachable from there:
+
+   ```bash
+   mkdir -p ~/.dsh/profiles/web/node_modules/@chenkai114
+   ln -s "$(npm root -g)/@chenkai114/dsh-daemon" \
+     ~/.dsh/profiles/web/node_modules/@chenkai114/dsh-daemon
+   ```
+
+3. Add a loader patch entry to the web profile so the plugin mounts at the
    next boot:
 
    ```yaml
@@ -109,8 +119,13 @@ daemon/
          name: '@chenkai114/dsh-daemon'
    ```
 
-3. Restart `dsh web`. The six `dsh_daemon_*` tools then become available to
+4. Restart `dsh web`. The six `dsh_daemon_*` tools then become available to
    every agent — just ask the agent to run `dsh_daemon_install`.
+
+> Permissions: the daemon manages per-user system services (LaunchAgent
+> plists, state files under `$DSH_HOME`), so the plugin requests
+> `danger-full-access` for its file and command operations. On a deployment
+> that denies escalation the tools fail with sandbox denials.
 
 ### Option B — dynamic Cordis plugin (no install)
 

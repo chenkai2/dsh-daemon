@@ -60,12 +60,23 @@ const services = {
     interval(fn, ms) { const id = setInterval(fn, ms); return () => clearInterval(id); },
   },
   webServer: { port: 3080 },
+  sandboxPolicy: {
+    resolve(request = {}) {
+      return { mode: request.mode || 'danger-full-access', workspaceRoot: process.cwd() };
+    },
+  },
   tools: {
     register(def) { registered.push(def); return () => {}; },
   },
 };
 const registered = [];
+// Property access mirrors a real ctx with the plugin's `inject` list applied.
 const ctx = {
+  shell: services.shell,
+  fs: services.fs,
+  timer: services.timer,
+  webServer: services.webServer,
+  tools: services.tools,
   get(name) { return services[name]; },
   on() { return () => {}; },
   effect(fn) { const r = fn(); return typeof r === 'function' ? r : () => {}; },
