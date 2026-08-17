@@ -82,23 +82,51 @@ daemon/
 
 ## Usage
 
-### As a DSH composition row (static package)
+> The package lives in the GitHub repository and is **not published to the
+> npm registry** — `npm install @chenkai2/dsh-daemon` from a registry returns
+> 404. Install it from GitHub as below.
 
-Add to the web profile's `cordis.yml` (or a patch layer):
+### Option A — install from GitHub, mount as a composition row
 
-```yaml
-- id: dsh-daemon
-  name: '@chenkai2/dsh-daemon'
+1. Install the package where the dsh deployment can resolve it (a globally
+   installed `dsh` resolves the global `node_modules`):
+
+   ```bash
+   npm install -g github:chenkai2/dsh-daemon
+   ```
+
+   (equivalent: `npm install -g git+https://github.com/chenkai2/dsh-daemon.git`)
+
+2. Add a loader patch entry to the web profile so the plugin mounts at the
+   next boot:
+
+   ```yaml
+   # ~/.dsh/profiles/web/cordis.patch.yml
+   - insert:
+       - id: dsh-daemon
+         name: '@chenkai2/dsh-daemon'
+   ```
+
+3. Restart `dsh web`. The six `dsh_daemon_*` tools then become available to
+   every agent — just ask the agent to run `dsh_daemon_install`.
+
+### Option B — dynamic Cordis plugin (no install)
+
+Paste the content of `lib/index.js` into the `code.host` field of
+`cordis_define` and run it. This is how the plugin is developed and verified
+in a live session: the sandbox supplies the `harness` global, and the file
+ends with `return plugin;`.
+
+### Publishing to the npm registry (optional)
+
+To make `npm install @chenkai2/dsh-daemon` work from a registry, the package
+must be published first (requires an npm account authenticated against
+registry.npmjs.org):
+
+```bash
+npm login
+npm publish
 ```
-
-(`npm install @chenkai2/dsh-daemon` into the deployment first, or vendor the
-package into the deployment's `node_modules`.)
-
-### As a dynamic Cordis plugin
-
-The file `lib/index.js` is dual-mode: paste its content into the `code.host`
-field of `cordis_define` (the sandbox supplies the `harness` global; the file
-ends with `return plugin;`).
 
 ### Port
 
