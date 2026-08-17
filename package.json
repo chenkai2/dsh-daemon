@@ -1,0 +1,44 @@
+{
+  "name": "@chenkai2/dsh-daemon",
+  "version": "0.1.0",
+  "description": "dsh daemon: register the DeepSeek Harness web server (dsh web) as an auto-start, self-healing background service (LaunchAgent / systemd / cron + watchdog) - a port of `wecode daemon install`.",
+  "main": "lib/index.js",
+  "type": "commonjs",
+  "files": [
+    "lib"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "daemon",
+    "watchdog",
+    "launchagent",
+    "launchd",
+    "systemd",
+    "self-healing",
+    "wecode"
+  ],
+  "license": "MIT",
+  "author": "chenkai2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chenkai2/dsh-daemon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chenkai2/dsh-daemon/issues"
+  },
+  "homepage": "https://github.com/chenkai2/dsh-daemon#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=3"
+  },
+  "scripts": {
+    "test": "node test/harness.js dsh_daemon_status"
+  }
+}
