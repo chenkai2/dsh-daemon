@@ -12,6 +12,11 @@ After install, `dsh web`:
 
 The currently running session is never touched by install/uninstall.
 
+> Account map: the npm package is published under the **`@chenkai114`** scope
+> (npm account `chenkai114`); the source repository lives under the GitHub
+> account **`chenkai2`** — `github.com/chenkai2/dsh-daemon`. `@chenkai114`
+> everywhere means npm, `chenkai2` everywhere means GitHub.
+
 ---
 
 ## Architecture
