@@ -20,6 +20,9 @@
   ],
   "license": "MIT",
   "author": "chenkai2",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/chenkai2/dsh-daemon.git"
