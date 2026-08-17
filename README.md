@@ -82,20 +82,17 @@ daemon/
 
 ## Usage
 
-> The package lives in the GitHub repository and is **not published to the
-> npm registry** — `npm install @chenkai2/dsh-daemon` from a registry returns
-> 404. Install it from GitHub as below.
-
-### Option A — install from GitHub, mount as a composition row
+### Option A — install from the npm registry, mount as a composition row
 
 1. Install the package where the dsh deployment can resolve it (a globally
    installed `dsh` resolves the global `node_modules`):
 
    ```bash
-   npm install -g github:chenkai2/dsh-daemon
+   npm install -g @chenkai114/dsh-daemon
    ```
 
-   (equivalent: `npm install -g git+https://github.com/chenkai2/dsh-daemon.git`)
+   (alternative: install straight from the repository —
+   `npm install -g github:chenkai2/dsh-daemon`)
 
 2. Add a loader patch entry to the web profile so the plugin mounts at the
    next boot:
@@ -104,7 +101,7 @@ daemon/
    # ~/.dsh/profiles/web/cordis.patch.yml
    - insert:
        - id: dsh-daemon
-         name: '@chenkai2/dsh-daemon'
+         name: '@chenkai114/dsh-daemon'
    ```
 
 3. Restart `dsh web`. The six `dsh_daemon_*` tools then become available to
@@ -116,17 +113,6 @@ Paste the content of `lib/index.js` into the `code.host` field of
 `cordis_define` and run it. This is how the plugin is developed and verified
 in a live session: the sandbox supplies the `harness` global, and the file
 ends with `return plugin;`.
-
-### Publishing to the npm registry (optional)
-
-To make `npm install @chenkai2/dsh-daemon` work from a registry, the package
-must be published first (requires an npm account authenticated against
-registry.npmjs.org):
-
-```bash
-npm login
-npm publish
-```
 
 ### Port
 
