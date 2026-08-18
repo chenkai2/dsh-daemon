@@ -1,5 +1,7 @@
 # dsh-daemon
 
+[English](README.md) | [中文](README.zh.md)
+
 Register the **DeepSeek Harness** web server (`dsh web`) as an auto-start,
 self-healing background service.
 
@@ -7,7 +9,7 @@ After install, `dsh web`:
 
 - starts automatically on login (LaunchAgent `RunAtLoad` / systemd `WantedBy=default.target` / cron `@reboot`),
 - restarts automatically after sleep/wake,
-- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 30 s and restarts the server after 3 consecutive failures,
+- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 3 s (configurable) and restarts the server after 3 consecutive failures,
 - survives this session: the watchdog is a standalone generated script, not an in-memory plugin.
 
 The currently running session is never touched by install/uninstall.
@@ -44,7 +46,7 @@ runs on any Node ≥ 18, no session required):
 
 - writes its PID to `.dsh-watchdog.pid`; SIGINT / SIGTERM / SIGHUP clean up and exit; a single-instance lock refuses duplicate watchers;
 - at startup, launches the web server (`node <dsh> web --port <port>`, detached, output to `logs/dsh-web.log`) if `http://127.0.0.1:<port>/health` is not OK;
-- then every 30 s:
+- then every 3 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
   - skips when `.daemon-stopped` exists (user paused monitoring) or `.daemon-restart.lock` is fresh (< 120 s, a restart is in progress);
   - restarts the server when a tick gap exceeds 90 s (sleep/wake);
   - restarts the server after 3 consecutive failed health checks;
