@@ -8,7 +8,7 @@
 
 - 登录时自动启动（LaunchAgent `RunAtLoad` / systemd `WantedBy=default.target` / cron `@reboot`）
 - 睡眠唤醒后自动重启
-- 自愈：watchdog 每 **3 秒**（可配置）健康检查一次 `http://127.0.0.1:<port>/health`，连续 3 次失败后重启服务
+- 自愈：watchdog 每 **30 秒**（可配置）健康检查一次 `http://127.0.0.1:<port>/health`，连续 3 次失败后重启服务
 - 不依赖当前会话：watchdog 是独立生成的脚本，而非内存中的插件
 
 安装/卸载**永远不会触碰**当前正在运行的会话。
@@ -78,7 +78,7 @@
 
 - 将自身 PID 写入 `.dsh-watchdog.pid`；SIGINT / SIGTERM / SIGHUP 清理后退出；单实例锁拒绝重复的 watchdog
 - 启动时若 `http://127.0.0.1:<port>/health` 不健康，则拉起 web 服务（`node <dsh> web --port <port>`，分离运行，输出到 `logs/dsh-web.log`）
-- 之后每 3 秒（可通过 `DSH_DAEMON_HEALTH_INTERVAL` 配置）：
+- 之后每 30 秒（可通过 `DSH_DAEMON_HEALTH_INTERVAL` 配置）：
   - 存在 `.daemon-stopped`（用户暂停监控）或 `.daemon-restart.lock` 较新（< 120 秒，重启进行中）时跳过；
   - tick 间隔超过 90 秒（睡眠唤醒）时重启服务；
   - 连续 3 次健康检查失败后重启服务；
@@ -166,7 +166,7 @@ watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 pr
 | `DSH_DAEMON_DEFER_MAX` | `15m` | 活动端点不可达时最多等待多久再重启 |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | 检查与 pnpm 更新所用的 registry |
 | `DSH_DAEMON_PROFILE` | `web` | 存放插件的 profile 目录 |
-| `DSH_DAEMON_HEALTH_INTERVAL` | `3s` | watchdog 循环的健康检查间隔（`ms`/`s`/`m`；连续 3 次失败触发重启） |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | watchdog 循环的健康检查间隔（`ms`/`s`/`m`；连续 3 次失败触发重启） |
 
 > 自动更新逻辑位于生成的 `watchdog.js` 中；升级到含新更新逻辑的版本后，运行一次 `dsh_daemon_reinstall` 重新生成。
 

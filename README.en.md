@@ -100,7 +100,7 @@ runs on any Node ≥ 18, no session required):
 
 - writes its PID to `.dsh-watchdog.pid`; SIGINT / SIGTERM / SIGHUP clean up and exit; a single-instance lock refuses duplicate watchers;
 - at startup, launches the web server (`node <dsh> web --port <port>`, detached, output to `logs/dsh-web.log`) if `http://127.0.0.1:<port>/health` is not OK;
-- then every 3 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
+- then every 30 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
   - skips when `.daemon-stopped` exists (user paused monitoring) or `.daemon-restart.lock` is fresh (< 120 s, a restart is in progress);
   - restarts the server when a tick gap exceeds 90 s (sleep/wake);
   - restarts the server after 3 consecutive failed health checks;
@@ -206,7 +206,7 @@ into the generated watchdog script:
 | `DSH_DAEMON_DEFER_MAX` | `15m` | max wait for the activity endpoint before restarting anyway |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | registry used for checks and pnpm update |
 | `DSH_DAEMON_PROFILE` | `web` | profile directory holding the plugin |
-| `DSH_DAEMON_HEALTH_INTERVAL` | `3s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures trigger a restart) |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures trigger a restart) |
 
 > The auto-update logic lives in the generated `watchdog.js`; after upgrading
 > to a version with new update logic, run `dsh_daemon_reinstall` once to
