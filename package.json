@@ -1,6 +1,6 @@
 {
   "name": "@chenkai114/dsh-daemon",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "dsh daemon: register the DeepSeek Harness web server (dsh web) as an auto-start, self-healing background service (LaunchAgent / systemd / cron + watchdog).",
   "main": "lib/index.js",
   "type": "commonjs",
