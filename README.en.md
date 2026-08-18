@@ -39,21 +39,25 @@ The currently running session is never touched by install/uninstall.
    > own `node_modules` — managed here by pnpm — is what makes the package
    > reachable.
 
-2. Add a loader patch entry to the web profile so the plugin mounts at the
-   next boot:
+2. Restart `dsh web`. The package declares a `dsh.bundle` manifest, so
+   `dsh plugin add` automatically appends it to `dsh.profile.bundles` and it
+   mounts as a bundle layer at boot — you do **not** need (and **must not**)
+   also insert the same row manually into
+   `~/.dsh/profiles/web/cordis.patch.yml`, or boot fails with
+   `duplicate loader entry id: dsh-daemon`.
 
-   ```yaml
-   # ~/.dsh/profiles/web/cordis.patch.yml
-   - insert:
-       - id: dsh-daemon
-         name: '@chenkai114/dsh-daemon'
-   ```
-
-3. Restart `dsh web`. The seven `dsh_daemon_*` tools then become available to
-   every agent — just ask the agent to run `dsh_daemon_install`.
+   The seven `dsh_daemon_*` tools then become available to every agent — just
+   ask the agent to run `dsh_daemon_install`.
 
 To upgrade later: `dsh plugin --profile web update @chenkai114/dsh-daemon`
 (plus a restart).
+
+> ⚠️ Upgrading from v0.1.8 or earlier: if you previously followed the old docs
+> and added a manual `- insert: dsh-daemon` row to
+> `~/.dsh/profiles/web/cordis.patch.yml`, you must **delete that row** (keep
+> anything else in the file) after upgrading — otherwise the bundle layer and
+> the manual layer insert the same `id: dsh-daemon` twice and `dsh web` fails
+> to boot with `duplicate loader entry id`. Restart after deleting it.
 
 > Permissions: the daemon manages per-user system services (LaunchAgent
 > plists, state files under `$DSH_HOME`), so the plugin requests

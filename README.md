@@ -19,7 +19,7 @@
 
 ## 使用方式
 
-### 方式 A —— 用 `dsh plugin` 安装并挂载为组合行
+### 方式 A —— 用 `dsh plugin` 安装（v0.1.9+，推荐）
 
 1. 用官方插件管理器将包安装到 **web profile**（在 profile 目录内运行 pnpm，使 loader 能解析到它；仅全局安装不够——见下）：
 
@@ -31,18 +31,13 @@
 
    > 为什么不能只 `npm install -g`？loader 以 Node ESM 解析导入 `name:` 行，解析锚点是 profile 目录（`~/.dsh/profiles/web/`）；全局 `node_modules` 不在该解析链上（`NODE_PATH` 对 ESM 无效）。profile 自己的 `node_modules`——由 pnpm 管理——才是包可达的原因。
 
-2. 在 web profile 添加 loader 补丁条目，使插件在下次启动时挂载：
+2. 重启 `dsh web`。包声明了 `dsh.bundle` manifest，`dsh plugin add` 会把它自动加入 `dsh.profile.bundles`，启动时作为 bundle 层挂载——**不需要**（也**不应该**）再手动往 `~/.dsh/profiles/web/cordis.patch.yml` 里 insert 同一行，否则会触发 `duplicate loader entry id: dsh-daemon` 启动失败。
 
-   ```yaml
-   # ~/.dsh/profiles/web/cordis.patch.yml
-   - insert:
-       - id: dsh-daemon
-         name: '@chenkai114/dsh-daemon'
-   ```
-
-3. 重启 `dsh web`。七个 `dsh_daemon_*` 工具即可供每个 agent 使用——直接让 agent 运行 `dsh_daemon_install`。
+   七个 `dsh_daemon_*` 工具即可供每个 agent 使用——直接让 agent 运行 `dsh_daemon_install`。
 
 以后升级：`dsh plugin --profile web update @chenkai114/dsh-daemon`（并重启）。
+
+> ⚠️ 从 v0.1.8 及更早版本升级：如果你之前按旧文档在 `~/.dsh/profiles/web/cordis.patch.yml` 里手动加过 `- insert: dsh-daemon` 行，升级后必须**删掉那一行**（保留文件里其他内容），否则 bundle 层 + 手动层会插入同一个 `id: dsh-daemon` 两次，`dsh web` 启动时报 `duplicate loader entry id`。删除后重启即可。
 
 > 权限说明：daemon 管理用户级系统服务（LaunchAgent plist、`$DSH_HOME` 下的状态文件），因此插件对其文件与命令操作请求 `danger-full-access`。若部署拒绝提权，工具会以沙箱拒绝失败。
 
