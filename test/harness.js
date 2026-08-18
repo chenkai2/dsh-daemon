@@ -59,7 +59,16 @@ const services = {
     timeout(ms) { return new Promise((r) => setTimeout(r, ms)); },
     interval(fn, ms) { const id = setInterval(fn, ms); return () => clearInterval(id); },
   },
-  webServer: { port: 3080 },
+  webServer: {
+    port: 3080,
+    register(route) { registeredRoutes.push(route); return () => {}; },
+  },
+  agents: {
+    list() { return []; },
+  },
+  jobs: {
+    list() { return []; },
+  },
   sandboxPolicy: {
     resolve(request = {}) {
       return { mode: request.mode || 'danger-full-access', workspaceRoot: process.cwd() };
@@ -70,12 +79,15 @@ const services = {
   },
 };
 const registered = [];
+const registeredRoutes = [];
 // Property access mirrors a real ctx with the plugin's `inject` list applied.
 const ctx = {
   shell: services.shell,
   fs: services.fs,
   timer: services.timer,
   webServer: services.webServer,
+  agents: services.agents,
+  jobs: services.jobs,
   tools: services.tools,
   get(name) { return services[name]; },
   on() { return () => {}; },

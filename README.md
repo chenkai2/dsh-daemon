@@ -60,16 +60,17 @@ runs on any Node ≥ 18, no session required):
 
 ## Tools
 
-The plugin is Host-only and registers six model-callable tools:
+The plugin is Host-only and registers seven model-callable tools:
 
 | Tool | What it does |
 | --- | --- |
-| `dsh_daemon_install` | Generates `watchdog.js` + state files, writes the LaunchAgent plist (or systemd unit / cron entry), `launchctl load -w`, starts the watchdog now. Optional `port` argument. |
+| `dsh_daemon_install` | Generates `watchdog.js` + state files, writes the LaunchAgent plist (or systemd unit / cron entry, VBS + Task Scheduler on Windows), starts the watchdog now. Optional `port` argument. |
 | `dsh_daemon_uninstall` | Stops the watchdog, unloads and deletes the platform registration, removes all state files. |
-| `dsh_daemon_reinstall` | uninstall + install (use after upgrading dsh or changing the port). |
-| `dsh_daemon_status` | Installed since, port, watchdog PID/liveness, manual-stop flag, server health, last log lines. |
+| `dsh_daemon_reinstall` | uninstall + install (use after upgrading dsh or changing the port; also regenerates the watchdog with the current auto-update configuration). |
+| `dsh_daemon_status` | Installed since, port, local/latest versions, update state, watchdog PID/liveness, manual-stop flag, server health, last log lines. |
 | `dsh_daemon_start` | Clears the stopped flag, ensures the watchdog runs, launches the server if unhealthy. |
 | `dsh_daemon_stop` | Writes the stopped flag (watchdog will not restart), stops the daemon-managed server if one is running. Never touches the current session. |
+| `dsh_daemon_update` | Check for a newer version (`apply: false`, default) or download and apply it (`apply: true`). Also the manual entry point for major version changes. |
 
 ### State files (`$DSH_HOME/daemon/`, `$DSH_HOME` defaults to `~/.dsh`)
 
@@ -82,10 +83,57 @@ daemon/
 ├── .daemon-restart.lock   # restart-in-progress marker (TTL 120 s)
 ├── .dsh-watchdog.pid      # watchdog PID
 ├── .dsh-web.pid           # daemon-managed web server PID
+├── .daemon-update.lock    # update-in-progress lock (concurrency guard)
+├── .daemon-update-pending # downloaded update awaiting a restart to activate
+├── .daemon-update-check.json  # last update check result (status display)
+├── dsh-watchdog.vbs       # Windows: hidden wscript launcher
+├── dsh-watchdog-task.xml  # Windows: Task Scheduler XML (UTF-16LE)
 └── logs/
     ├── watchdog.log       # watchdog log (5 MB × 3 rotation)
     └── dsh-web.log        # web server stdout/stderr when launched by the watchdog
 ```
+
+---
+
+## Auto-update
+
+The watchdog checks the npm registry **at startup and every 6 h** and updates
+`@chenkai114/dsh-daemon` in the profile directory with pnpm:
+
+- **Version policy**: same-major versions (0.1.3 → 0.1.4, 0.2.x → 0.2.y) update
+  automatically; a major change (0.x → 1.x, 1.x → 2.x, …) is only reported and
+  requires the manual `dsh_daemon_update` tool.
+- **Update modes** (`DSH_DAEMON_UPDATE_MODE`):
+  - `download` (default): the new package is installed in the profile and a
+    pending marker is written; the update activates on the next natural
+    `dsh web` restart. No session is ever interrupted.
+  - `restart`: after downloading, the watchdog polls the plugin's
+    `/dsh-daemon/activity` endpoint (agent turns + background jobs) every 30 s
+    and restarts `dsh web` only after it has been idle for the quiet window —
+    an in-progress conversation or job defers the restart until it finishes.
+    If the endpoint is unreachable (plugin not mounted), the restart still
+    happens after `DSH_DAEMON_DEFER_MAX`.
+- **Failure safety**: registry unreachable, pnpm failure, or a version
+  mismatch after update only writes a log line and the check state; the old
+  package stays installed (pnpm's store keeps it, so
+  `dsh plugin --profile web add @chenkai114/dsh-daemon@<old>` rolls back).
+
+Configuration is captured at `dsh_daemon_install`/`reinstall` time and embedded
+into the generated watchdog script:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `DSH_DAEMON_AUTO_UPDATE` | `1` | `0` disables the checks |
+| `DSH_DAEMON_UPDATE_INTERVAL` | `6h` | check interval (`ms`/`s`/`m`/`h`/`d`) |
+| `DSH_DAEMON_UPDATE_MODE` | `download` | `download` or `restart` |
+| `DSH_DAEMON_QUIET_WINDOW` | `5m` | idle time required before a restart-mode restart |
+| `DSH_DAEMON_DEFER_MAX` | `15m` | max wait for the activity endpoint before restarting anyway |
+| `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | registry used for checks and pnpm update |
+| `DSH_DAEMON_PROFILE` | `web` | profile directory holding the plugin |
+
+> The auto-update logic lives in the generated `watchdog.js`; after upgrading
+> to a version with new update logic, run `dsh_daemon_reinstall` once to
+> regenerate it.
 
 ---
 
