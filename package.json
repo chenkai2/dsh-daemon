@@ -7,6 +7,11 @@
   "files": [
     "lib"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",

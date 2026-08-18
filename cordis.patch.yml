@@ -1,0 +1,5 @@
+# dsh-daemon bundle patch: mount the plugin as a composition row so its seven
+# dsh_daemon_* tools are available to every agent after the next dsh web start.
+- insert:
+    - id: dsh-daemon
+      name: '@chenkai114/dsh-daemon'
