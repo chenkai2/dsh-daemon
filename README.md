@@ -31,7 +31,11 @@ A per-user service that starts the watchdog at login and keeps it alive:
 | --- | --- |
 | macOS | LaunchAgent `~/Library/LaunchAgents/com.deepseek-ai.dsh-watchdog.plist` — `ProgramArguments=[node, watchdog.js]`, `RunAtLoad`, `KeepAlive{SuccessfulExit:false}`, `ThrottleInterval=10`, environment carries `DSH_WEB_PORT` and `DSH_HOME`. Loaded with `launchctl load -w`. |
 | Linux | systemd user unit `~/.config/systemd/user/dsh-watchdog.service` — `Type=simple`, `Restart=always`, `RestartSec=10`, `StartLimitIntervalSec=0`; enabled with `systemctl --user enable --now`. Falls back to a cron `@reboot` entry when systemd is unavailable. |
-| Windows | not supported yet |
+| Windows | VBS launcher + Task Scheduler — task `DshWatchdog` (XML in `$DSH_HOME/daemon/dsh-watchdog-task.xml`, UTF-16LE) runs `wscript.exe //B dsh-watchdog.vbs` at logon; the VBS sets `DSH_WEB_PORT`/`DSH_HOME` and starts `node watchdog.js` hidden. `RestartOnFailure` PT1M/999, `MultipleInstancesPolicy=IgnoreNew`. Registered with `schtasks /Create`. |
+
+> Windows support is implemented mirroring the macOS/Linux behavior (the
+> plugin's shell layer switches to PowerShell, which is the DSH shell
+> executor on win32) but has not yet been verified on a real Windows machine.
 
 ### 2. The watchdog loop
 
