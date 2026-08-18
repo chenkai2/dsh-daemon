@@ -72,6 +72,26 @@ The plugin is Host-only and registers seven model-callable tools:
 | `dsh_daemon_stop` | Writes the stopped flag (watchdog will not restart), stops the daemon-managed server if one is running. Never touches the current session. |
 | `dsh_daemon_update` | Check for a newer version (`apply: false`, default) or download and apply it (`apply: true`). Also the manual entry point for major version changes. |
 
+### Command line (`dsh-daemon`)
+
+`dsh_daemon_install` also writes a thin **`dsh-daemon`** command into the node
+`bin` directory (PATH), so the daemon is controllable from a terminal without
+opening the GUI:
+
+| Command | What it does |
+| --- | --- |
+| `dsh-daemon status` | Same status as the GUI tool. |
+| `dsh-daemon restart` | **Immediately** restarts `dsh web` (kills the process on the port and launches a new one; no waiting for the health loop), verified healthy before returning. |
+| `dsh-daemon start` | Clears the stopped flag, starts the watchdog if missing, launches the web server if unhealthy. |
+| `dsh-daemon stop` | Writes the stopped flag and kills the web server (including a manually started one). |
+| `dsh-daemon update` | Check the registry (`--apply` to download and apply). |
+| `dsh-daemon install` / `uninstall` / `reinstall` | Registration operations, executed by the plugin through its `/dsh-daemon/command` route — these need `dsh web` to be up (the supervision commands above work standalone via the watchdog script). |
+| `dsh-daemon help` | Usage. |
+
+`restart`/`stop` interrupt all open sessions, exactly like a manual `pkill` —
+the watchdog relaunches the web server on the next health cycle if the direct
+launch fails.
+
 ### State files (`$DSH_HOME/daemon/`, `$DSH_HOME` defaults to `~/.dsh`)
 
 ```
@@ -130,6 +150,7 @@ into the generated watchdog script:
 | `DSH_DAEMON_DEFER_MAX` | `15m` | max wait for the activity endpoint before restarting anyway |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | registry used for checks and pnpm update |
 | `DSH_DAEMON_PROFILE` | `web` | profile directory holding the plugin |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `3s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures trigger a restart) |
 
 > The auto-update logic lives in the generated `watchdog.js`; after upgrading
 > to a version with new update logic, run `dsh_daemon_reinstall` once to
