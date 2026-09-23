@@ -51,8 +51,10 @@ assert.strictEqual(gate.dshNoOpenSupported(undefined), false);
 
 // ---- watchdog template wiring (raw source assertions) ----------------------
 const src = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
-assert.ok(src.includes("const args = [DSH_BIN, \\'web\\', \\'--port\\', String(PORT)];"),
-  'template should build the launch args without --no-open');
+assert.ok(src.includes("const args = [currentDshBin(), \\'web\\', \\'--port\\', String(PORT)];"),
+  'template should build the launch args from currentDshBin() (self-healing bin resolution)');
+assert.ok(!src.includes("const args = [DSH_BIN,"),
+  'template must not launch from the baked DSH_BIN directly (vanishes when pnpm moves the store dir)');
 assert.ok(src.includes("args.push(\\'--no-open\\')"),
   'template should append --no-open via a conditional push');
 assert.ok(!src.includes("[DSH_BIN, \\'web\\', \\'--port\\', String(PORT), \\'--no-open\\']"),
