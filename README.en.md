@@ -215,6 +215,8 @@ into the generated watchdog script:
 | `DSH_DAEMON_OPEN_BROWSER` | `1` | when `0`, never auto-open the browser even when a new-dsh launch token is detected (the URL is still written to `~/.dsh/daemon/.web-auth-url` and the watchdog log for manual access) |
 | `DSH_DAEMON_CLI_DIR` | node bin dir | directory for the generated `dsh-daemon` CLI (tests/sandboxed installs point it at a temp dir to avoid polluting the real PATH) |
 | `DSH_DAEMON_NO_SYSTEM` | unset | when `1`, skips system-level registration (launchd/schtasks/systemd) — test/sandboxed installs never touch the host's services; the watchdog is still started directly |
+| `DSH_DAEMON_TRUSTED_HOST` | unset | Reverse-proxy deployments: the host (comma-separated list) is captured at install/reinstall time and embedded into the generated watchdog so `dsh web` is launched with `--trusted-host`; without it dsh's `/api` trust fence answers 403 for the public Host. It is embedded because the plugin's own nohup-started watchdog never sees the plist/unit environment |
+| `DSH_DAEMON_ALLOW_EPHEMERAL_HOME` | unset | `1` allows registering against a temporary `DSH_HOME` (`/tmp`, `/var/folders`); by default the canonical `~/.dsh` is used instead, so cleaning a temp dir can no longer leave the LaunchAgent/systemd registration permanently broken (test runs with `DSH_DAEMON_NO_SYSTEM=1` are never redirected) |
 | `DSH_DAEMON_TRUSTED_HOST` | unset | comma-separated `--trusted-host` list (e.g. `dsh.example.com,192.168.5.5:8080`). When dsh web is reached through a reverse proxy (nginx) the Host header is the public hostname and the /api browser-trust fence would reject it with 403 — set this to make dsh web trust those Hosts |
 
 > The auto-update logic lives in the generated `watchdog.js`; after upgrading

@@ -165,6 +165,8 @@ watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 pr
 | `DSH_DAEMON_OPEN_BROWSER` | `1` | `0` 时即使检测到新版 dsh 的启动 token 也不自动弹浏览器（URL 仍写入 `~/.dsh/daemon/.web-auth-url` 与 watchdog 日志，可人工访问） |
 | `DSH_DAEMON_CLI_DIR` | node bin 目录 | 生成的 `dsh-daemon` CLI 写入目录（测试/沙箱安装时指向临时目录，避免污染真实 PATH） |
 | `DSH_DAEMON_NO_SYSTEM` | 未设置 | `1` 时跳过系统级注册（launchd/schtasks/systemd）——测试/沙箱安装不触碰宿主系统服务，watchdog 仍直接启动 |
+| `DSH_DAEMON_TRUSTED_HOST` | 未设置 | 反代场景：安装/重装时把 Host（可逗号分隔）固化进生成的 watchdog，`dsh web` 启动时自动追加 `--trusted-host`；不设置而由反代进来时 dsh 的 `/api` 会 403。固化进脚本是因为插件自启的 watchdog 拿不到 plist/unit 的环境变量 |
+| `DSH_DAEMON_ALLOW_EPHEMERAL_HOME` | 未设置 | `1` 时允许把注册装到临时 `DSH_HOME`（`/tmp`、`/var/folders`）上；默认拒绝并改用 `~/.dsh`，避免临时目录被清理后 LaunchAgent/systemd 注册永久失效（`DSH_DAEMON_NO_SYSTEM=1` 的测试不受影响） |
 | `DSH_DAEMON_TRUSTED_HOST` | 未设置 | 逗号分隔的 `--trusted-host` 列表（如 `dsh.example.com,10.0.0.5:8080`）。经反向代理（nginx）访问时 Host 头是公网域名，/api 信任围栏会 403——设此项让 dsh web 信任这些 Host |
 
 > 自动更新逻辑位于生成的 `watchdog.js` 中；升级到含新更新逻辑的版本后，运行一次 `dsh_daemon_reinstall` 重新生成。
