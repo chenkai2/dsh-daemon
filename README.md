@@ -1,3 +1,20 @@
+## 版本对照（dsh-daemon ↔ dsh）
+
+| dsh-daemon | 支撑的 dsh | 说明 |
+|---|---|---|
+| 0.1.25 | **0.1.x 与 0.2.x** | 适配 0.2.x 的 shell 服务改名：`run(spec)` → `execute(spec)` + 句柄 `result()`（0.2.1 上 `reinstall` 曾报 `shell.run is not a function`），并兼容两种结果形状 |
+| 0.1.24 | 0.1.x（0.2.x 部分路径不可用） | OIDC 发布流水线；未适配 0.2.x shell API |
+| 0.1.23 | ≥ `0.1.2-alpha.1`（token 认证起） | 注册漂移自愈、status 如实上报注册状态、拒绝易失 DSH_HOME |
+| 0.1.21–0.1.22 | 同上 | 单实例守卫校验 cmdline、dsh web 显式传 cwd |
+| 0.1.20 | 同上 | `DSH_DAEMON_TRUSTED_HOST`：反代场景下给 dsh web 追 `--trusted-host` |
+| 0.1.19 | 同上 | 自动开浏览器补齐 token 认证的入场 cookie |
+| ≤ 0.1.18 | ≥ `0.1.0-rc.8`（`--no-open` 起） | 更早的 dsh 没有 `--no-open`，watchdog 启动时会跳过该参数 |
+
+两个门限常量取自代码（`lib/index.js`）：`DSH_NO_OPEN_MIN = 0.1.0-rc.8`、`DSH_TOKEN_AUTH_MIN = 0.1.2-alpha.1`。
+dsh 侧与 daemon 交互的接口只有三处：web 启动参数、`/health` 探活、以及注入的 `shell`/`fs` 服务 —— 后者是 0.2.x 唯一改过的地方。
+
+---
+
 # dsh-daemon
 
 [中文](README.md) | [English](README.en.md)

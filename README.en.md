@@ -1,3 +1,20 @@
+## Compatibility (dsh-daemon vs dsh)
+
+| dsh-daemon | Supported dsh | Notes |
+|---|---|---|
+| 0.1.25 | **0.1.x and 0.2.x** | Adapts to the renamed shell service in 0.2.x: `run(spec)` → `execute(spec)` plus a handle's `result()` (0.2.1 failed `reinstall` with `shell.run is not a function`), with tolerant result shapes |
+| 0.1.24 | 0.1.x (parts of 0.2.x broken) | Adds the OIDC publish pipeline; does not adapt to the 0.2.x shell API |
+| 0.1.23 | ≥ `0.1.2-alpha.1` (token auth) | Registration-drift self-heal, honest registration status, refuses ephemeral DSH_HOME |
+| 0.1.21–0.1.22 | same | Single-instance guard verifies cmdline; explicit cwd for dsh web |
+| 0.1.20 | same | `DSH_DAEMON_TRUSTED_HOST`: appends `--trusted-host` behind a reverse proxy |
+| 0.1.19 | same | Opens the browser once to seed the token-auth cookie |
+| ≤ 0.1.18 | ≥ `0.1.0-rc.8` (`--no-open`) | Older dsh lacks `--no-open`; the watchdog omits the flag |
+
+Thresholds are read from code (`lib/index.js`): `DSH_NO_OPEN_MIN = 0.1.0-rc.8`, `DSH_TOKEN_AUTH_MIN = 0.1.2-alpha.1`.
+The daemon touches only three dsh interfaces: web launch flags, the `/health` probe, and the injected `shell`/`fs` services — the last being the one 0.2.x changed.
+
+---
+
 # dsh-daemon
 
 [中文](README.md) | [English](README.en.md)
