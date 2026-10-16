@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.27 | **0.1.x and 0.2.x** | Health-check interval default 30 s → **10 s** (faster self-heal); adds `dsh-daemon logs` and `dsh_daemon_logs`: a failed dsh web start now prints a systemctl-style details pointer (web + watchdog log tails, `/health`, PID, launch age) |
 | 0.1.26 | **0.1.x and 0.2.x** | Startup grace: a slow-booting `dsh web` (large plugin set, cold caches) is no longer declared dead after ~90 s and restarted forever — health misses inside the grace never count (`DSH_DAEMON_STARTUP_GRACE`, default 5m); stopping the previous server now sends SIGTERM before SIGKILL and waits for the port to be free (fixes the `EADDRINUSE` restart storm); `status` / `start` report "still starting" honestly |
 | 0.1.25 | **0.1.x and 0.2.x** | Adapts to the renamed shell service in 0.2.x: `run(spec)` → `execute(spec)` plus a handle's `result()` (0.2.1 failed `reinstall` with `shell.run is not a function`), with tolerant result shapes |
 | 0.1.24 | 0.1.x (parts of 0.2.x broken) | Adds the OIDC publish pipeline; does not adapt to the 0.2.x shell API |
@@ -27,7 +28,7 @@ After install, `dsh web`:
 
 - starts automatically on login (LaunchAgent `RunAtLoad` / systemd `WantedBy=default.target` / cron `@reboot`),
 - restarts automatically after sleep/wake,
-- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 30 s (configurable) and restarts the server after 3 consecutive failures,
+- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 10 s (configurable) and restarts the server after 3 consecutive failures,
 - tolerates slow boots: while a freshly launched `dsh web` is inside its **startup grace** (`DSH_DAEMON_STARTUP_GRACE`, default 5m) health misses never count towards a restart and the process is never killed,
 - survives this session: the watchdog is a standalone generated script, not an in-memory plugin.
 
@@ -123,7 +124,7 @@ runs on any Node ≥ 18, no session required):
 
 - writes its PID to `.dsh-watchdog.pid`; SIGINT / SIGTERM / SIGHUP clean up and exit; a single-instance lock refuses duplicate watchers;
 - at startup, launches the web server (`node <dsh> web --port <port>`, detached, output to `logs/dsh-web.log`) if `http://127.0.0.1:<port>/health` is not OK;
-- then every 30 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
+- then every 10 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
   - skips when `.daemon-stopped` exists (user paused monitoring) or `.daemon-restart.lock` is fresh (< 120 s, a restart is in progress);
   - restarts the server when a tick gap exceeds 90 s (sleep/wake);
   - logs "still starting" (never kills, never counts failures) while the process is alive inside its **startup grace** (`.dsh-web.started` younger than `DSH_DAEMON_STARTUP_GRACE`, default 5m) — a `dsh web` with a large plugin set or cold caches can take tens of seconds to minutes before it serves `/health`, and the old hard 90 s verdict made it impossible to start;
@@ -142,14 +143,15 @@ runs on any Node ≥ 18, no session required):
 
 ## Tools
 
-The plugin is Host-only and registers seven model-callable tools:
+The plugin is Host-only and registers eight model-callable tools:
 
 | Tool | What it does |
 | --- | --- |
 | `dsh_daemon_install` | Generates `watchdog.js` + state files, writes the LaunchAgent plist (or systemd unit / cron entry, VBS + Task Scheduler on Windows), starts the watchdog now. Optional `port` argument. |
 | `dsh_daemon_uninstall` | Stops the watchdog, unloads and deletes the platform registration, removes all state files. |
 | `dsh_daemon_reinstall` | uninstall + install (use after upgrading dsh or changing the port; also regenerates the watchdog with the current auto-update configuration). |
-| `dsh_daemon_status` | Installed since, port, local/latest versions, update state, watchdog PID/liveness, manual-stop flag, server health, last log lines. |
+| `dsh_daemon_status` | Installed since, port, local/latest versions, update state, watchdog PID/liveness, manual-stop flag, server health, last log lines. When the web server is unhealthy it adds a `Details:` line pointing at `dsh_daemon_logs`. |
+| `dsh_daemon_logs` | The detail entry point for a failed dsh web start: the tail of the web server's stdout/stderr log and of the watchdog log, plus the current `/health` code, web PID and launch age. Optional `lines` (default 50) and `source` (`all`/`web`/`watchdog`). Terminal equivalent: `dsh-daemon logs`. |
 | `dsh_daemon_start` | Clears the stopped flag, ensures the watchdog runs, launches the server if unhealthy. |
 | `dsh_daemon_stop` | Writes the stopped flag (watchdog will not restart), stops the daemon-managed server if one is running. Never touches the current session. |
 | `dsh_daemon_update` | Check for a newer version (`apply: false`, default) or download and apply it (`apply: true`). Also the manual entry point for major version changes. |
@@ -166,6 +168,7 @@ opening the GUI:
 | `dsh-daemon restart` | **Immediately** restarts `dsh web` (kills the process on the port and launches a new one; no waiting for the health loop), verified healthy before returning. |
 | `dsh-daemon start` | Clears the stopped flag, starts the watchdog if missing, launches the web server if unhealthy. |
 | `dsh-daemon stop` | Writes the stopped flag and kills the web server (including a manually started one). |
+| `dsh-daemon logs` | The details: tail of the web log and the watchdog log (`-n 100` for line count, `--web`/`--watchdog` for one of them). Use this when `dsh web` fails to start. |
 | `dsh-daemon update` | Check the registry (`--apply` to download and apply). |
 | `dsh-daemon install` / `uninstall` / `reinstall` | Registration operations, executed by the plugin through its `/dsh-daemon/command` route — these need `dsh web` to be up (the supervision commands above work standalone via the watchdog script). |
 | `dsh-daemon help` | Usage. |
@@ -173,6 +176,45 @@ opening the GUI:
 `restart`/`stop` interrupt all open sessions, exactly like a manual `pkill` —
 the watchdog relaunches the web server on the next health cycle if the direct
 launch fails.
+
+#### Reading the details of a failed start
+
+Just as `systemctl` prints a "use journalctl for details" pointer when a unit
+fails, every daemon failure message points at one command:
+
+```
+$ dsh-daemon restart
+dsh-daemon: restarting dsh web on port 3080...
+  launched dsh web (PID 51234)
+❌ dsh web exited during startup — last log lines:
+     | Error: cannot find module @acme/plugin-x
+     |     plugin activation failed for row "plugin-x"
+   Details: dsh-daemon logs -n 100  (raw log: ~/.dsh/daemon/logs/dsh-web.log)
+
+$ dsh-daemon logs -n 50
+dsh-daemon logs — dsh web startup diagnostics
+  port 3080  |  /health ❌ not serving  |  web pid 51234 (not running)  |  last launch 3s ago
+  web log:      ~/.dsh/daemon/logs/dsh-web.log  (272 bytes, updated ...)
+  watchdog log: ~/.dsh/daemon/logs/watchdog.log  (975 bytes, updated ...)
+
+--- dsh-web.log (last 50 lines, ~/.dsh/daemon/logs/dsh-web.log) ---
+  | Error: cannot find module @acme/plugin-x
+  |     plugin activation failed for row "plugin-x"
+
+--- watchdog.log (last 50 lines, ~/.dsh/daemon/logs/watchdog.log) ---
+  | [2026-10-16T12:23:42.653Z] [watchdog] web server not healthy on port 3080 at startup, launching... (details: dsh-daemon logs -n 100)
+```
+
+- `dsh-daemon logs` prints 50 lines per log by default and ends with the
+  `tail -f` commands for live following;
+- the diagnosis header answers the three questions that matter first: is
+  `/health` serving, is the tracked web PID alive, and how long ago was the
+  current launch (a fresh launch still inside the startup grace is not a failure);
+- in a sandbox or without a terminal, the `dsh_daemon_logs` tool (`lines`,
+  `source`) returns the same content;
+- the log files are always at `$DSH_HOME/daemon/logs/dsh-web.log` (the web
+  server's stdout/stderr — a startup crash is explained here) and
+  `$DSH_HOME/daemon/logs/watchdog.log` (the watchdog's decisions).
 
 ### State files (`$DSH_HOME/daemon/`, `$DSH_HOME` defaults to `~/.dsh`)
 
@@ -233,7 +275,7 @@ into the generated watchdog script:
 | `DSH_DAEMON_DEFER_MAX` | `15m` | max wait for the activity endpoint before restarting anyway |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | registry used for checks and pnpm update |
 | `DSH_DAEMON_PROFILE` | `web` | profile directory holding the plugin |
-| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures outside the startup grace trigger a restart) |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `10s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures outside the startup grace trigger a restart — about 30 s on the default tick) |
 | `DSH_DAEMON_STARTUP_GRACE` | `5m` | startup grace for `dsh web` (`ms`/`s`/`m`): health misses inside it never count towards a restart and never kill the process. Keep the default for a large plugin set or a slow cold boot; lower it (e.g. `90s`) if you know your `dsh web` is up in seconds and you want a genuinely hung boot detected sooner |
 | `DSH_DAEMON_OPEN_BROWSER` | `1` | when `0`, never auto-open the browser even when a new-dsh launch token is detected (the URL is still written to `~/.dsh/daemon/.web-auth-url` and the watchdog log for manual access) |
 | `DSH_DAEMON_CLI_DIR` | node bin dir | directory for the generated `dsh-daemon` CLI (tests/sandboxed installs point it at a temp dir to avoid polluting the real PATH) |
@@ -256,6 +298,7 @@ All of the following were verified end-to-end against the real plugin code:
 - on an empty port the watchdog launches a real `dsh web --port <port>` at startup (health OK on the new port);
 - self-heal: after `SIGKILL` of the managed server → `health check failed (1/3 → 2/3 → 3/3)` → `failure threshold reached, restarting web server` → new process serves 200;
 - startup grace (`node test/startup-grace.test.js`, real generated watchdog + fake `dsh`): a boot that only serves /health after 8 s is only logged as "still starting" inside a 20 s grace (no restart, no kill); once a 2 s grace expires the previous process is stopped with SIGTERM before a relaunch, and every relaunch follows such a stop (port released first);
+- diagnosable failed starts (`node test/logs-command.test.js`, real generated watchdog + a fake `dsh` that dies instantly): the default tick is baked as `INTERVAL_MS = 10000`; a failed `--start` prints `Details: dsh-daemon logs -n 100`; `dsh-daemon logs` / `--logs` / `dsh_daemon_logs` all show the dsh web crash output and the watchdog decisions;
 - launchd `KeepAlive`: `SIGKILL` of the watchdog → launchd restarts it within ~11 s;
 - single-instance guard: running `watchdog.js` a second time exits immediately;
 - `stop` writes the pause flag and kills only the daemon-managed server; `start` clears it; `uninstall` removes launchd registration, plist, state files and frees the port; `status` reflects every state.
@@ -266,10 +309,44 @@ All of the following were verified end-to-end against the real plugin code:
 node test/harness.js dsh_daemon_status          # static package mode
 DYNAMIC=1 node test/harness.js dsh_daemon_status # dynamic sandbox mode
 node test/startup-grace.test.js                 # startup grace: slow boot survives, grace expiry restarts, graceful stop
+node test/logs-command.test.js                  # 10s tick default + dsh-daemon logs / failure-path details pointer
 ```
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.27 — 10 s health checks, diagnosable failed starts (`dsh-daemon logs`)
+
+**Faster self-heal**: the watchdog health-check interval default moves from 30 s
+to **10 s** (`DSH_DAEMON_HEALTH_INTERVAL`, still overridable with `ms`/`s`/`m`).
+The failure threshold is still 3 consecutive misses, so "process alive but past
+the grace and never healthy" now triggers a restart in ~30 s instead of ~90 s;
+the sleep/wake gap (90 s) and the minimum restart gap (15 s) stay above the tick,
+so nothing false-positives or hot-loops.
+
+**Failed starts have a details entry point**: when `dsh web` does not come up,
+you previously had to find the files under `~/.dsh/daemon/logs/` yourself. Now:
+
+- new `dsh-daemon logs [-n N] [--web | --watchdog]` (the watchdog's `--logs`
+  mode; the bash/cmd wrappers forward to it): 50 lines of the web and watchdog
+  logs by default, preceded by a diagnosis header (`/health` state, whether the
+  tracked PID is alive, how old the current launch is, whether monitoring is
+  paused) and followed by the `tail -f` commands for live following;
+- every failure path prints the pointer, systemctl-style: `dsh-daemon start` /
+  `restart` failures print `Details: dsh-daemon logs -n 100  (raw log: …/dsh-web.log)`,
+  `status` prints the same line when unhealthy, and the generated watchdog writes
+  `(details: dsh-daemon logs -n 100)` into its own log — so tailing
+  `watchdog.log` alone still leads to the detail command;
+- new `dsh_daemon_logs` tool (`lines`, `source`) returns the same content in a
+  sandbox or without a terminal;
+- regression test `test/logs-command.test.js` drives the real generated watchdog
+  against a fake `dsh` that dies instantly and covers the 10 s default tick, the
+  failure hint, both `--logs` filters, unknown options, the CLI forwarding and
+  the tool output.
+
+> Generated artifacts must be regenerated: after an upgrade the watchdog
+> rewrites itself based on `GEN_VERSION`; if the version did not change, run
+> `dsh_daemon_reinstall` once.
 
 ### v0.1.19 — dsh web token-auth adaptation (seeding the `?token=` launch token)
 
