@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.26 | **0.1.x and 0.2.x** | Startup grace: a slow-booting `dsh web` (large plugin set, cold caches) is no longer declared dead after ~90 s and restarted forever — health misses inside the grace never count (`DSH_DAEMON_STARTUP_GRACE`, default 5m); stopping the previous server now sends SIGTERM before SIGKILL and waits for the port to be free (fixes the `EADDRINUSE` restart storm); `status` / `start` report "still starting" honestly |
 | 0.1.25 | **0.1.x and 0.2.x** | Adapts to the renamed shell service in 0.2.x: `run(spec)` → `execute(spec)` plus a handle's `result()` (0.2.1 failed `reinstall` with `shell.run is not a function`), with tolerant result shapes |
 | 0.1.24 | 0.1.x (parts of 0.2.x broken) | Adds the OIDC publish pipeline; does not adapt to the 0.2.x shell API |
 | 0.1.23 | ≥ `0.1.2-alpha.1` (token auth) | Registration-drift self-heal, honest registration status, refuses ephemeral DSH_HOME |
@@ -26,7 +27,8 @@ After install, `dsh web`:
 
 - starts automatically on login (LaunchAgent `RunAtLoad` / systemd `WantedBy=default.target` / cron `@reboot`),
 - restarts automatically after sleep/wake,
-- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 3 s (configurable) and restarts the server after 3 consecutive failures,
+- self-heals: a watchdog health-checks `http://127.0.0.1:<port>/health` every 30 s (configurable) and restarts the server after 3 consecutive failures,
+- tolerates slow boots: while a freshly launched `dsh web` is inside its **startup grace** (`DSH_DAEMON_STARTUP_GRACE`, default 5m) health misses never count towards a restart and the process is never killed,
 - survives this session: the watchdog is a standalone generated script, not an in-memory plugin.
 
 The currently running session is never touched by install/uninstall.
@@ -124,7 +126,10 @@ runs on any Node ≥ 18, no session required):
 - then every 30 s (configurable via `DSH_DAEMON_HEALTH_INTERVAL`):
   - skips when `.daemon-stopped` exists (user paused monitoring) or `.daemon-restart.lock` is fresh (< 120 s, a restart is in progress);
   - restarts the server when a tick gap exceeds 90 s (sleep/wake);
-  - restarts the server after 3 consecutive failed health checks;
+  - logs "still starting" (never kills, never counts failures) while the process is alive inside its **startup grace** (`.dsh-web.started` younger than `DSH_DAEMON_STARTUP_GRACE`, default 5m) — a `dsh web` with a large plugin set or cold caches can take tens of seconds to minutes before it serves `/health`, and the old hard 90 s verdict made it impossible to start;
+  - restarts immediately when the process is gone (crash, `EADDRINUSE` during plugin activation, OOM) instead of waiting out the failure threshold;
+  - restarts the server after 3 consecutive failed health checks (process alive past the grace but never healthy);
+  - stops the previous server with SIGTERM first, waits up to 8 s for `dsh web` to dispose cleanly and release its listener, escalates to SIGKILL, then waits for the port to be free (up to 5 s) before launching — a fresh `dsh web` that starts onto a held port dies with `EADDRINUSE` during activation;
   - exits when the `.daemon-installed` marker disappears (uninstalled);
 - logs to `logs/watchdog.log` (5 MB × 3 rotation).
 
@@ -228,7 +233,8 @@ into the generated watchdog script:
 | `DSH_DAEMON_DEFER_MAX` | `15m` | max wait for the activity endpoint before restarting anyway |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | registry used for checks and pnpm update |
 | `DSH_DAEMON_PROFILE` | `web` | profile directory holding the plugin |
-| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures trigger a restart) |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | health-check interval of the watchdog loop (`ms`/`s`/`m`; 3 failures outside the startup grace trigger a restart) |
+| `DSH_DAEMON_STARTUP_GRACE` | `5m` | startup grace for `dsh web` (`ms`/`s`/`m`): health misses inside it never count towards a restart and never kill the process. Keep the default for a large plugin set or a slow cold boot; lower it (e.g. `90s`) if you know your `dsh web` is up in seconds and you want a genuinely hung boot detected sooner |
 | `DSH_DAEMON_OPEN_BROWSER` | `1` | when `0`, never auto-open the browser even when a new-dsh launch token is detected (the URL is still written to `~/.dsh/daemon/.web-auth-url` and the watchdog log for manual access) |
 | `DSH_DAEMON_CLI_DIR` | node bin dir | directory for the generated `dsh-daemon` CLI (tests/sandboxed installs point it at a temp dir to avoid polluting the real PATH) |
 | `DSH_DAEMON_NO_SYSTEM` | unset | when `1`, skips system-level registration (launchd/schtasks/systemd) — test/sandboxed installs never touch the host's services; the watchdog is still started directly |
@@ -249,6 +255,7 @@ All of the following were verified end-to-end against the real plugin code:
 - install → `plutil -lint` OK, `launchctl list` shows the agent, watchdog logs `watchdog started (PID …, port 3080)` / `web server already healthy on port 3080`;
 - on an empty port the watchdog launches a real `dsh web --port <port>` at startup (health OK on the new port);
 - self-heal: after `SIGKILL` of the managed server → `health check failed (1/3 → 2/3 → 3/3)` → `failure threshold reached, restarting web server` → new process serves 200;
+- startup grace (`node test/startup-grace.test.js`, real generated watchdog + fake `dsh`): a boot that only serves /health after 8 s is only logged as "still starting" inside a 20 s grace (no restart, no kill); once a 2 s grace expires the previous process is stopped with SIGTERM before a relaunch, and every relaunch follows such a stop (port released first);
 - launchd `KeepAlive`: `SIGKILL` of the watchdog → launchd restarts it within ~11 s;
 - single-instance guard: running `watchdog.js` a second time exits immediately;
 - `stop` writes the pause flag and kills only the daemon-managed server; `start` clears it; `uninstall` removes launchd registration, plist, state files and frees the port; `status` reflects every state.
@@ -258,6 +265,7 @@ All of the following were verified end-to-end against the real plugin code:
 ```bash
 node test/harness.js dsh_daemon_status          # static package mode
 DYNAMIC=1 node test/harness.js dsh_daemon_status # dynamic sandbox mode
+node test/startup-grace.test.js                 # startup grace: slow boot survives, grace expiry restarts, graceful stop
 ```
 
 The harness runs the real plugin code with real bash/fs and invokes the tool

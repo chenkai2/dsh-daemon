@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.26 | **0.1.x 与 0.2.x** | 启动宽限期：`dsh web` 启动慢（大插件集、冷缓存）时不再被 watchdog 按 90 秒判死反复重启，宽限期内不计健康失败（`DSH_DAEMON_STARTUP_GRACE`，默认 5 分钟）；停旧进程改为先 SIGTERM 再 SIGKILL 并等端口真正释放（修 `EADDRINUSE` 连锁失败）；`status` / `start` 如实报「仍在启动」 |
 | 0.1.25 | **0.1.x 与 0.2.x** | 适配 0.2.x 的 shell 服务改名：`run(spec)` → `execute(spec)` + 句柄 `result()`（0.2.1 上 `reinstall` 曾报 `shell.run is not a function`），并兼容两种结果形状 |
 | 0.1.24 | 0.1.x（0.2.x 部分路径不可用） | OIDC 发布流水线；未适配 0.2.x shell API |
 | 0.1.23 | ≥ `0.1.2-alpha.1`（token 认证起） | 注册漂移自愈、status 如实上报注册状态、拒绝易失 DSH_HOME |
@@ -26,6 +27,7 @@ dsh 侧与 daemon 交互的接口只有三处：web 启动参数、`/health` 探
 - 登录时自动启动（LaunchAgent `RunAtLoad` / systemd `WantedBy=default.target` / cron `@reboot`）
 - 睡眠唤醒后自动重启
 - 自愈：watchdog 每 **30 秒**（可配置）健康检查一次 `http://127.0.0.1:<port>/health`，连续 3 次失败后重启服务
+- 慢启动安全：刚拉起的 `dsh web` 处在**启动宽限期**（`DSH_DAEMON_STARTUP_GRACE`，默认 5 分钟）内时，健康检查失败不计入重启阈值，进程也不会被杀
 - 不依赖当前会话：watchdog 是独立生成的脚本，而非内存中的插件
 
 安装/卸载**永远不会触碰**当前正在运行的会话。
@@ -93,7 +95,10 @@ dsh 侧与 daemon 交互的接口只有三处：web 启动参数、`/health` 探
 - 之后每 30 秒（可通过 `DSH_DAEMON_HEALTH_INTERVAL` 配置）：
   - 存在 `.daemon-stopped`（用户暂停监控）或 `.daemon-restart.lock` 较新（< 120 秒，重启进行中）时跳过；
   - tick 间隔超过 90 秒（睡眠唤醒）时重启服务；
-  - 连续 3 次健康检查失败后重启服务；
+  - 服务仍在**启动宽限期**内（`.dsh-web.started` 距今 < `DSH_DAEMON_STARTUP_GRACE`，默认 5 分钟）且进程存活时，只记录「仍在启动」，不计失败、不重启——大插件集/冷缓存的 `dsh web` 可能几十秒到几分钟才对外提供 `/health`，旧的「90 秒判死」会让它永远起不来；
+  - 进程已消失（崩溃、激活期 `EADDRINUSE`、OOM）时立刻重启，不等满 3 次失败；
+  - 连续 3 次健康检查失败后重启服务（进程存活但超过宽限期仍未健康）；
+  - 停旧进程先发 SIGTERM，等待最多 8 秒（`dsh web` 会优雅退出并释放监听端口），仍不退再 SIGKILL；随后等端口真正空闲（最多 5 秒）才拉起新进程，避免新进程在插件激活期报 `EADDRINUSE` 而秒退；
   - `.daemon-installed` 标记消失（已卸载）时退出；
 - 日志写入 `logs/watchdog.log`（5 MB × 3 轮转）。
 
@@ -178,7 +183,8 @@ watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 pr
 | `DSH_DAEMON_DEFER_MAX` | `15m` | 活动端点不可达时最多等待多久再重启 |
 | `DSH_DAEMON_NPM_REGISTRY` | `https://registry.npmjs.org` | 检查与 pnpm 更新所用的 registry |
 | `DSH_DAEMON_PROFILE` | `web` | 存放插件的 profile 目录 |
-| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | watchdog 循环的健康检查间隔（`ms`/`s`/`m`；连续 3 次失败触发重启） |
+| `DSH_DAEMON_HEALTH_INTERVAL` | `30s` | watchdog 循环的健康检查间隔（`ms`/`s`/`m`；宽限期外连续 3 次失败触发重启） |
+| `DSH_DAEMON_STARTUP_GRACE` | `5m` | `dsh web` 启动宽限期（`ms`/`s`/`m`）：这段时间内的健康检查失败不计入重启阈值，也不会杀进程。插件多、机器冷启动慢时保持默认；确定自己的 `dsh web` 十几秒就能起来时可以调小（如 `90s`）以更快发现真正的卡死 |
 | `DSH_DAEMON_OPEN_BROWSER` | `1` | `0` 时即使检测到新版 dsh 的启动 token 也不自动弹浏览器（URL 仍写入 `~/.dsh/daemon/.web-auth-url` 与 watchdog 日志，可人工访问） |
 | `DSH_DAEMON_CLI_DIR` | node bin 目录 | 生成的 `dsh-daemon` CLI 写入目录（测试/沙箱安装时指向临时目录，避免污染真实 PATH） |
 | `DSH_DAEMON_NO_SYSTEM` | 未设置 | `1` 时跳过系统级注册（launchd/schtasks/systemd）——测试/沙箱安装不触碰宿主系统服务，watchdog 仍直接启动 |
@@ -197,6 +203,7 @@ watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 pr
 - 安装 → `plutil -lint` 通过，`launchctl list` 显示该 agent，watchdog 日志 `watchdog started (PID …, port 3080)` / `web server already healthy on port 3080`
 - 在空端口上，watchdog 启动时拉起真实 `dsh web --port <port>`（新端口健康 OK）
 - 自愈：`SIGKILL` 托管服务后 → `health check failed (1/3 → 2/3 → 3/3)` → `failure threshold reached, restarting web server` → 新进程返回 200
+- 启动宽限期（`node test/startup-grace.test.js`，真实生成的 watchdog + 假 `dsh`）：8 秒才健康的慢启动在 20 秒宽限内只记录「仍在启动」，不重启也不杀进程；宽限期结束（2 秒）后先 SIGTERM 再拉起新进程，每次重启都有对应的优雅停止（端口先释放）
 - launchd `KeepAlive`：`SIGKILL` watchdog 后约 11 秒内被 launchd 重启
 - 单实例保护：重复运行 `watchdog.js` 立即退出
 - `stop` 写入暂停标记并只杀托管服务；`start` 清除；`uninstall` 移除 launchd 注册、plist、状态文件并释放端口；`status` 反映全部状态
@@ -206,6 +213,7 @@ watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 pr
 ```bash
 node test/harness.js dsh_daemon_status          # 静态包模式
 DYNAMIC=1 node test/harness.js dsh_daemon_status # 动态沙箱模式
+node test/startup-grace.test.js                 # 启动宽限期：慢启动不被杀、超时才重启、优雅停止
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
