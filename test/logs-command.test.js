@@ -163,8 +163,24 @@ function makeCtx(registered) {
     fs.mkdirSync(home, { recursive: true });
 
     const registered = [];
-    const plugin = require(path.join(root, 'lib', 'index.js'));
-    await plugin.apply(makeCtx(registered));
+    // Load the plugin the way the DSH cordis host loads it in dynamic-sandbox
+    // mode: evaluate lib/index.js with a `harness` global. The static-package
+    // path would require @deepseek-ai/dsh-tools, which this repo's committed
+    // package-lock.json pins to a machine-local `link: true` entry — CI cannot
+    // resolve it (`npm ci` succeeds, the symlink dangles), so the release-
+    // pipeline test must not depend on that module.
+    const src = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
+    const mockHarness = {
+      defineTool(def) {
+        if (!def || typeof def.execute !== 'function') throw new Error('bad tool def');
+        if (!def.output || typeof def.output.render !== 'function') throw new Error('bad output');
+        return def;
+      },
+      registerTool(ctx2, def) { registered.push(def); return () => {}; },
+    };
+    const ctx = makeCtx(registered);
+    const plugin = new Function('ctx', 'harness', src)(ctx, mockHarness);
+    await plugin.apply(ctx);
     const install = registered.find((t) => t.name === 'dsh_daemon_install');
     const logsTool = registered.find((t) => t.name === 'dsh_daemon_logs');
     check('注册了 dsh_daemon_install 工具', !!install);
