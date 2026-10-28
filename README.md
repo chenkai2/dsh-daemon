@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.28 | **0.1.x 与 0.2.x** | 修「健康检查误杀 + 重启风暴」：`/health` 单次预算 5s → **20s**、失败阈值 3 → **5**（~50s 真超时才重启）；tick 串行（`tickBusy`）+ `launch()` 单飞，杜绝同一秒拉起两个 dsh web（`EADDRINUSE`）；**收养**未托管但正在服务的 dsh web（纠正 pid 文件）而不是再拉一个；停进程前校验「这个 PID 真的是 dsh web」（PID 复用不误杀）；`status` 报出 pid 文件与实际监听者不一致；非 JS 入口（`dsh.ps1`/`.cmd` shim）拒绝启动并明确报错 |
 | 0.1.27 | **0.1.x 与 0.2.x** | 健康检查间隔默认 30s → **10s**（自愈更快）；新增 `dsh-daemon logs` 与 `dsh_daemon_logs`：dsh web 启动失败时像 systemctl 一样打印明细入口（web + watchdog 日志尾部、`/health`、PID、启动时长） |
 | 0.1.26 | **0.1.x 与 0.2.x** | 启动宽限期：`dsh web` 启动慢（大插件集、冷缓存）时不再被 watchdog 按 90 秒判死反复重启，宽限期内不计健康失败（`DSH_DAEMON_STARTUP_GRACE`，默认 5 分钟）；停旧进程改为先 SIGTERM 再 SIGKILL 并等端口真正释放（修 `EADDRINUSE` 连锁失败）；`status` / `start` 如实报「仍在启动」 |
 | 0.1.25 | **0.1.x 与 0.2.x** | 适配 0.2.x 的 shell 服务改名：`run(spec)` → `execute(spec)` + 句柄 `result()`（0.2.1 上 `reinstall` 曾报 `shell.run is not a function`），并兼容两种结果形状 |
@@ -251,9 +252,42 @@ node test/harness.js dsh_daemon_status          # 静态包模式
 DYNAMIC=1 node test/harness.js dsh_daemon_status # 动态沙箱模式
 node test/startup-grace.test.js                 # 启动宽限期：慢启动不被杀、超时才重启、优雅停止
 node test/logs-command.test.js                  # 10s tick 默认值 + dsh-daemon logs / 失败明细入口
+node test/restart-loop.test.js                  # 收养未托管实例 + 慢 /health 不再误杀
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.28 — 健康检查不再误杀，重启风暴收口
+
+一次真实故障（8 核机器 load average 100+、swap 用满）：`/health` 偶尔要
+4.6 秒才回，watchdog 的单次预算是 5 秒、失败阈值 3 次 —— 于是健康的 dsh web
+在半小时内被杀了三次；第三次之后 pid 文件落在一个已经死掉的进程上，真正在
+服务的是另一个未托管实例，watchdog 既认不出它、也管不到它，只能每隔几分钟
+再拉起一个注定 `EADDRINUSE` 的新实例，把本已紧张的 CPU 再踩一脚。
+
+- **单次 `/health` 预算 5s → 20s，失败阈值 3 → 5**：约 50 秒真实超时才重启，
+  瞬时抖动与 GC/换页停顿不再被判死（`DSH_DAEMON_HEALTH_INTERVAL` 不受影响）。
+- **tick 串行**：`setInterval` 的异步体可以重叠，探测变慢后两轮同时看到
+  「进程没了」就各自拉起一次 —— 这正是同一秒出现两个 dsh web 的来源。现在
+  用 `tickBusy` 互斥，探测再慢也不会叠加。
+- **`launch()` 单飞**：tick、CLI、更新器同时要求启动时共享同一个 in-flight
+  promise，不会再出现「赢家服务、输家被记进 pid 文件」。
+- **收养未托管实例**：pid 文件指向死进程、而端口上已有健康的 dsh web 时，
+  把 pid 文件纠正为真实监听者并记日志（`adopted the running dsh web`），
+  不再拉起第二个；端口被非 dsh 进程占用时明确记录并拒绝盲拉。
+- **停进程前校验身份**：只对「确实是 `dsh web`」或「真的占着本端口的」PID
+  发信号，PID 复用不再误杀无关进程（issue #3 问题 1）。
+- **`status` 诚实**：pid 文件与实际监听者不一致时直接点出来，并给出
+  `dsh-daemon restart` 的修法。
+- **拒绝非 JS 入口**：`dsh.ps1`/`dsh.cmd`/pnpm sh 之类的 shim 若没解析成
+  `lib/bin.js`，直接报错而不是让 `node` 去解析 PowerShell（issue #3 N1 的
+  兜底），不再产出「日志显示启动成功、实际永远起不来」的循环。
+- 合并 PR #2（@QiE2035）：pnpm sh / `.cmd` shim 解析到真实 `lib/bin.js`，
+  并在 pnpm store GC / 重装后通过 shim 自愈 `DSH_BIN`。
+
+新增 `test/restart-loop.test.js`：用真实生成的 watchdog + 假 `dsh web` 复刻
+两个现场 —— ①pid 文件指向死进程时收养真实监听者且不重启；②单次 `/health`
+慢到 6 秒仍不触发重启。
 
 ### v0.1.27 — 健康检查 10s，启动失败可查明细（`dsh-daemon logs`）
 

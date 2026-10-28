@@ -230,8 +230,10 @@ function makeCtx(registered) {
     check('安装生成了 watchdog 脚本', fs.existsSync(watchdogJs));
     const script = fs.readFileSync(watchdogJs, 'utf8');
     check('watchdog 内嵌 20s 启动宽限期', script.indexOf('const STARTUP_GRACE_MS = 20000;') !== -1);
-    check('watchdog 先 SIGTERM 再 SIGKILL', script.indexOf("process.kill(pid, 'SIGTERM')") !== -1 &&
-      script.indexOf('killPid(pid)') !== -1);
+    // v0.1.28 起 stopWebServer 支持多个目标（跟踪 PID + 真实监听者），变量名由
+    // pid 变成 v，SIGKILL 走 stubborn.forEach(killPid)：断言按行为而不是变量名。
+    check('watchdog 先 SIGTERM 再 SIGKILL', script.indexOf("'SIGTERM'") !== -1 &&
+      script.indexOf('process.kill(') !== -1 && script.indexOf('killPid') !== -1);
     await killAll(1);
 
     // ---- F1: a slow boot inside the grace is not killed ---------------------

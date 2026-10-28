@@ -51,8 +51,12 @@ assert.strictEqual(gate.dshNoOpenSupported(undefined), false);
 
 // ---- watchdog template wiring (raw source assertions) ----------------------
 const src = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
-assert.ok(src.includes("const args = [currentDshBin(), \\'web\\', \\'--port\\', String(PORT)];"),
-  'template should build the launch args from currentDshBin() (self-healing bin resolution)');
+// v0.1.28 起先取 currentDshBin() 到 entry 并做「必须是 JS 入口」的守卫，
+// 启动参数再用 entry —— 仍然走自愈解析，只是多了一道 shim 拒绝。
+assert.ok(src.includes("const entry = currentDshBin();"),
+  'template should resolve the launch entry through currentDshBin() (self-healing bin resolution)');
+assert.ok(src.includes("const args = [entry, \\'web\\', \\'--port\\', String(PORT)];"),
+  'template should build the launch args from the resolved entry');
 assert.ok(!src.includes("const args = [DSH_BIN,"),
   'template must not launch from the baked DSH_BIN directly (vanishes when pnpm moves the store dir)');
 assert.ok(src.includes("args.push(\\'--no-open\\')"),

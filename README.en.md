@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.28 | **0.1.x and 0.2.x** | Fixes health-check false kills and the restart storm: per-probe `/health` budget 5 s → **20 s**, failure threshold 3 → **5** (~50 s of real misses before a restart); serialized ticks (`tickBusy`) plus a single-flight `launch()` so two dsh web processes can no longer be spawned in the same second (`EADDRINUSE`); **adopts** an unmanaged dsh web that already serves the port (corrects the pid file) instead of launching a second one; verifies that a PID really is a dsh web before signalling it (no more killing a recycled PID); `status` reports a pid-file/listener mismatch; refuses non-JS entries (`dsh.ps1`/`.cmd` shims) with a clear error |
 | 0.1.27 | **0.1.x and 0.2.x** | Health-check interval default 30 s → **10 s** (faster self-heal); adds `dsh-daemon logs` and `dsh_daemon_logs`: a failed dsh web start now prints a systemctl-style details pointer (web + watchdog log tails, `/health`, PID, launch age) |
 | 0.1.26 | **0.1.x and 0.2.x** | Startup grace: a slow-booting `dsh web` (large plugin set, cold caches) is no longer declared dead after ~90 s and restarted forever — health misses inside the grace never count (`DSH_DAEMON_STARTUP_GRACE`, default 5m); stopping the previous server now sends SIGTERM before SIGKILL and waits for the port to be free (fixes the `EADDRINUSE` restart storm); `status` / `start` report "still starting" honestly |
 | 0.1.25 | **0.1.x and 0.2.x** | Adapts to the renamed shell service in 0.2.x: `run(spec)` → `execute(spec)` plus a handle's `result()` (0.2.1 failed `reinstall` with `shell.run is not a function`), with tolerant result shapes |
@@ -309,11 +310,53 @@ All of the following were verified end-to-end against the real plugin code:
 node test/harness.js dsh_daemon_status          # static package mode
 DYNAMIC=1 node test/harness.js dsh_daemon_status # dynamic sandbox mode
 node test/startup-grace.test.js                 # startup grace: slow boot survives, grace expiry restarts, graceful stop
+node test/restart-loop.test.js                  # adoption of an unmanaged listener + slow /health is tolerated
 node test/logs-command.test.js                  # 10s tick default + dsh-daemon logs / failure-path details pointer
 ```
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.28 — no more false kills, and the restart storm is closed
+
+From a real incident (8-core host under load average 100+, swap exhausted):
+`/health` occasionally took 4.6 s while the watchdog's per-probe budget was 5 s
+and the failure threshold 3, so a healthy dsh web was killed three times within
+half an hour. After the third restart the pid file pointed at a process that was
+already gone while an untracked instance kept serving the port; the daemon could
+neither recognise nor manage it, and launched a fresh instance every few minutes
+— each dying with `EADDRINUSE` and adding load to an already saturated host.
+
+- **Per-probe budget 5 s → 20 s, failure threshold 3 → 5**: a restart now needs
+  ~50 s of real misses, so GC/swap stalls and transient spikes no longer kill a
+  healthy server.
+- **Serialized ticks**: `setInterval` async bodies can overlap; once a probe got
+  slow, two rounds both saw "the process is gone" and each launched — exactly
+  how two dsh web processes appeared inside one second. `tickBusy` now makes a
+  slow probe harmless.
+- **Single-flight `launch()`**: tick, CLI and updater share one in-flight
+  promise, so the loser can no longer be recorded as the tracked PID while the
+  winner serves the port.
+- **Adoption**: when the pid file points at a dead process but a healthy dsh web
+  serves the port, the pid file is corrected to the real listener (logged as
+  `adopted the running dsh web`) instead of launching a duplicate; a port held
+  by a non-dsh process is logged and never blindly relaunched onto.
+- **Identity before signalling**: only a PID that really is a `dsh web` (or that
+  really owns the port) gets signalled, so PID reuse can no longer make the
+  daemon kill an unrelated process (issue #3, problem 1).
+- **Honest `status`**: a pid-file/listener mismatch is reported explicitly, with
+  the `dsh-daemon restart` remedy.
+- **Non-JS entries are refused**: an unresolved `dsh.ps1` / `.cmd` / pnpm sh shim
+  is reported instead of being handed to `node` (backstop for issue #3 N1), so
+  the "log says launched, nothing ever listens" loop is gone.
+- Merged PR #2 (@QiE2035): resolve pnpm sh / `.cmd` shims to the real
+  `lib/bin.js`, and self-heal `DSH_BIN` through the shim after a pnpm store GC
+  or reinstall.
+
+Adds `test/restart-loop.test.js`: the real generated watchdog plus a fake
+`dsh web` replay both scenes — (1) adoption of the real listener when the pid
+file points at a dead process, with no restart; (2) a 6 s `/health` answer no
+longer triggers a restart.
 
 ### v0.1.27 — 10 s health checks, diagnosable failed starts (`dsh-daemon logs`)
 
