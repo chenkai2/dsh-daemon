@@ -16,7 +16,6 @@
   "keywords": [
     "dsh",
     "deepseek-harness",
-    "cordis",
     "daemon",
     "watchdog",
     "launchagent",
@@ -45,8 +44,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
   },
   "scripts": {
-    "test": "node test/harness.js dsh_daemon_status && node test/version-gate.test.js && node test/token-auth.test.js && node test/registration-drift.test.js && node test/startup-grace.test.js && node test/logs-command.test.js",
-    "test:ci": "node test/version-gate.test.js && node test/token-auth.test.js && node test/shell-compat.test.js && node test/logs-command.test.js"
+    "test": "node test/harness.js dsh_daemon_status && node test/version-gate.test.js && node test/token-auth.test.js && node test/registration-drift.test.js && node test/startup-grace.test.js && node test/logs-command.test.js && node test/bin-self-heal.test.js && node test/shim-parse.test.js",
+    "test:ci": "node test/version-gate.test.js && node test/token-auth.test.js && node test/shell-compat.test.js && node test/logs-command.test.js && node test/bin-self-heal.test.js && node test/shim-parse.test.js"
   },
   "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621",
   "devDependencies": {
