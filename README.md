@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.29 | **0.1.x 与 0.2.x** | 自动更新加 dsh 兼容门禁：每版在 `package.json` 声明 `dsh.requires.dsh`，更新前比对客户端已装 dsh 版本，**不满足/未声明/读不到就跳过自动升级**（`dsh-daemon update --apply` 可人工强制）；更新检查改为 2 次尝试 + 15s 预算，错误细分为 timeout / DNS / HTTP / 连接失败，status 显示上次成功检查时间 |
 | 0.1.28 | **0.1.x 与 0.2.x** | 修「健康检查误杀 + 重启风暴」：`/health` 单次预算 5s → **20s**、失败阈值 3 → **5**（~50s 真超时才重启）；tick 串行（`tickBusy`）+ `launch()` 单飞，杜绝同一秒拉起两个 dsh web（`EADDRINUSE`）；**收养**未托管但正在服务的 dsh web（纠正 pid 文件）而不是再拉一个；停进程前校验「这个 PID 真的是 dsh web」（PID 复用不误杀）；`status` 报出 pid 文件与实际监听者不一致；非 JS 入口（`dsh.ps1`/`.cmd` shim）拒绝启动并明确报错 |
 | 0.1.27 | **0.1.x 与 0.2.x** | 健康检查间隔默认 30s → **10s**（自愈更快）；新增 `dsh-daemon logs` 与 `dsh_daemon_logs`：dsh web 启动失败时像 systemctl 一样打印明细入口（web + watchdog 日志尾部、`/health`、PID、启动时长） |
 | 0.1.26 | **0.1.x 与 0.2.x** | 启动宽限期：`dsh web` 启动慢（大插件集、冷缓存）时不再被 watchdog 按 90 秒判死反复重启，宽限期内不计健康失败（`DSH_DAEMON_STARTUP_GRACE`，默认 5 分钟）；停旧进程改为先 SIGTERM 再 SIGKILL 并等端口真正释放（修 `EADDRINUSE` 连锁失败）；`status` / `start` 如实报「仍在启动」 |
@@ -203,6 +204,7 @@ daemon/
 watchdog **启动时及每 6 小时**检查 npm registry，并用 pnpm 更新 profile 目录中的 `@chenkai114/dsh-daemon`：
 
 - **版本策略**：同 major 版本（0.1.3 → 0.1.4、0.2.x → 0.2.y）自动更新；major 变更（0.x → 1.x、1.x → 2.x、…）仅提示，需人工执行 `dsh_daemon_update` 工具。
+- **dsh 兼容门禁**：除 daemon 自身版本外，还要求新版本声明的 `dsh.requires.dsh` 与本机已装 dsh 版本相符；不满足、未声明或读不到本机 dsh 版本时**只提示、不自动安装**（`dsh-daemon update --apply` 可强制）。
 - **更新模式**（`DSH_DAEMON_UPDATE_MODE`）：
   - `restart`（默认）：下载完成后，watchdog 每 30 秒轮询插件的 `/dsh-daemon/activity` 端点（进行中的回合 + 后台任务），仅在安静窗口后重启 `dsh web`——进行中的对话或任务会推迟重启直到结束。端点不可达（插件未挂载）时，仍会在 `DSH_DAEMON_DEFER_MAX` 之后重启。完全无人值守。
   - `download`：新包安装到 profile 并写入待生效标记；下次自然重启 `dsh web` 时生效。绝不中断任何会话，把"何时生效"的控制权留给用户。
@@ -253,9 +255,40 @@ DYNAMIC=1 node test/harness.js dsh_daemon_status # 动态沙箱模式
 node test/startup-grace.test.js                 # 启动宽限期：慢启动不被杀、超时才重启、优雅停止
 node test/logs-command.test.js                  # 10s tick 默认值 + dsh-daemon logs / 失败明细入口
 node test/restart-loop.test.js                  # 收养未托管实例 + 慢 /health 不再误杀
+node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更新失败分类
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.29 — 自动更新加 dsh 兼容门禁，更新失败可诊断
+
+**背景**：更新逻辑一直只比较 **daemon 自己**的版本（`isNewer` + `sameMajor`）。
+一个装着旧 dsh 的客户端，会把「要求更新 dsh 才能跑的 daemon」自动装进来，
+然后 crash-loop 并连带把 `dsh web` 拖下水——之前 0.2.x 那次是靠「同时兼容
+两种 shell 形状」侥幸扛过去的，不是门禁保证的。
+
+**兼容门禁**（默认保守，宁可不动）：
+
+- 每个发布版本在 `package.json` 声明自己支持的 dsh 区间：
+  `"dsh": { "requires": { "dsh": ">=0.1.2-alpha.1 <0.3.0" } }`；
+- 更新检查直接读 registry `/latest` 返回的 manifest 里的这个字段，与**本机已装
+  dsh 版本**比对（区间语法只支持 `>= > <= < =` 用空格 AND 组合；不支持 `^ ~ ||`，
+  遇到看不懂的区间一律按「无法判定」处理，不猜）；
+- 三种情况都**跳过自动更新**并把原因写进 status：
+  `incompatible`（区间不满足，显示要求版本与当前版本）、
+  `unknown-dsh`（读不到本机 dsh 版本）、
+  `unverified-compat`（新版本没声明区间）；
+- 人工覆盖：`dsh-daemon update --apply` / `dsh_daemon_update` 的 `apply:true`
+  视为强制，会照装并在日志里写明「兼容性不满足但被强制」。
+
+**错误细分 + 重试**：单次 `fetch` 从 10s 一次改为 **15s × 2 次**（间隔 2s），
+失败按 `timeout after 15s` / `DNS lookup failed (ENOTFOUND)` /
+`connection failed (ECONNREFUSED)` / `registry HTTP 5xx` 分别记录，
+`status` 里额外显示 `Last successful registry check`。这修的是之前「离线、
+DNS 抖动、5xx 全都显示 registry unreachable」的问题。
+
+新增 `test/update-gate.test.js`：区间解析器 18 个边界用例（含 prerelease 排序、
+非法区间返回「无法判定」）+ 模板接线 + 真实生成一次 watchdog 并 `node --check`。
 
 ### v0.1.28 — 健康检查不再误杀，重启风暴收口
 

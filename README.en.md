@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.29 | **0.1.x and 0.2.x** | dsh compatibility gate for auto-update: every release declares `dsh.requires.dsh`, and the updater compares it with the installed dsh version — **unsatisfied / undeclared / unreadable dsh version skips the automatic update** (a human can force it with `dsh-daemon update --apply`); the registry probe now retries twice with a 15 s budget and classifies failures (timeout / DNS / HTTP / connection), and `status` shows the last successful check |
 | 0.1.28 | **0.1.x and 0.2.x** | Fixes health-check false kills and the restart storm: per-probe `/health` budget 5 s → **20 s**, failure threshold 3 → **5** (~50 s of real misses before a restart); serialized ticks (`tickBusy`) plus a single-flight `launch()` so two dsh web processes can no longer be spawned in the same second (`EADDRINUSE`); **adopts** an unmanaged dsh web that already serves the port (corrects the pid file) instead of launching a second one; verifies that a PID really is a dsh web before signalling it (no more killing a recycled PID); `status` reports a pid-file/listener mismatch; refuses non-JS entries (`dsh.ps1`/`.cmd` shims) with a clear error |
 | 0.1.27 | **0.1.x and 0.2.x** | Health-check interval default 30 s → **10 s** (faster self-heal); adds `dsh-daemon logs` and `dsh_daemon_logs`: a failed dsh web start now prints a systemctl-style details pointer (web + watchdog log tails, `/health`, PID, launch age) |
 | 0.1.26 | **0.1.x and 0.2.x** | Startup grace: a slow-booting `dsh web` (large plugin set, cold caches) is no longer declared dead after ~90 s and restarted forever — health misses inside the grace never count (`DSH_DAEMON_STARTUP_GRACE`, default 5m); stopping the previous server now sends SIGTERM before SIGKILL and waits for the port to be free (fixes the `EADDRINUSE` restart storm); `status` / `start` report "still starting" honestly |
@@ -248,6 +249,10 @@ The watchdog checks the npm registry **at startup and every 6 h** and updates
 - **Version policy**: same-major versions (0.1.3 → 0.1.4, 0.2.x → 0.2.y) update
   automatically; a major change (0.x → 1.x, 1.x → 2.x, …) is only reported and
   requires the manual `dsh_daemon_update` tool.
+- **dsh compatibility gate**: beyond the daemon's own version, the new release
+  must declare a `dsh.requires.dsh` range that the installed dsh satisfies.
+  Unsatisfied, undeclared, or unreadable local dsh version ⇒ report only, never
+  auto-install (`dsh-daemon update --apply` forces it).
 - **Update modes** (`DSH_DAEMON_UPDATE_MODE`):
   - `restart` (default): after downloading, the watchdog polls the plugin's
     `/dsh-daemon/activity` endpoint (agent turns + background jobs) every 30 s
@@ -311,11 +316,45 @@ node test/harness.js dsh_daemon_status          # static package mode
 DYNAMIC=1 node test/harness.js dsh_daemon_status # dynamic sandbox mode
 node test/startup-grace.test.js                 # startup grace: slow boot survives, grace expiry restarts, graceful stop
 node test/restart-loop.test.js                  # adoption of an unmanaged listener + slow /health is tolerated
+node test/update-gate.test.js                   # dsh compatibility range gate + classified check failures
 node test/logs-command.test.js                  # 10s tick default + dsh-daemon logs / failure-path details pointer
 ```
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.29 — dsh compatibility gate for auto-update, diagnosable check failures
+
+**Background**: the updater only ever compared **daemon** versions (`isNewer` +
+`sameMajor`). A client on an older dsh would automatically receive a daemon that
+requires a newer one, then crash-loop and take `dsh web` down with it — the 0.2.x
+shell-API change was survived by supporting both shapes, not by a gate.
+
+**Compatibility gate** (conservative by default — refuse rather than guess):
+
+- every release declares the dsh range it supports in `package.json`:
+  `"dsh": { "requires": { "dsh": ">=0.1.2-alpha.1 <0.3.0" } }`;
+- the check reads that field from the registry `/latest` manifest and compares it
+  with the **installed dsh version** (range syntax: `>= > <= < =` joined by
+  spaces; no `^ ~ ||` — an unparseable range is treated as "cannot verify",
+  never guessed);
+- three outcomes **skip the automatic update** and say why in `status`:
+  `incompatible` (range unsatisfied, shows required vs installed),
+  `unknown-dsh` (cannot read the local dsh version), and `unverified-compat`
+  (the new version declares no range);
+- human override: `dsh-daemon update --apply` / `dsh_daemon_update` with
+  `apply:true` is treated as forced — it installs and logs that compatibility
+  was not satisfied.
+
+**Classified failures + retry**: the probe went from one 10 s attempt to
+**15 s × 2** (2 s apart) and reports `timeout after 15s` /
+`DNS lookup failed (ENOTFOUND)` / `connection failed (ECONNREFUSED)` /
+`registry HTTP 5xx` instead of one blanket "registry unreachable"; `status` also
+shows `Last successful registry check`.
+
+Adds `test/update-gate.test.js`: 18 range-parser boundary cases (including
+prerelease ordering and "cannot verify" for garbage ranges), template wiring, and
+a real watchdog generation checked with `node --check`.
 
 ### v0.1.28 — no more false kills, and the restart storm is closed
 
