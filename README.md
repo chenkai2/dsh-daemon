@@ -35,7 +35,7 @@ dsh 侧与 daemon 交互的接口只有三处：web 启动参数、`/health` 探
 
 安装/卸载**永远不会触碰**当前正在运行的会话。
 
-> 账号对应关系（npm scope / GitHub 账号）见 [CONTEXT.md](CONTEXT.md)。
+> 账号对应关系（npm scope / GitHub 账号）见 [GLOSSARY.md](GLOSSARY.md)。
 
 ---
 

@@ -36,7 +36,7 @@ After install, `dsh web`:
 
 The currently running session is never touched by install/uninstall.
 
-> For the account map (npm scope / GitHub account) see [CONTEXT.md](CONTEXT.md).
+> For the account map (npm scope / GitHub account) see [GLOSSARY.md](GLOSSARY.md).
 
 ---
 
