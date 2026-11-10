@@ -177,10 +177,18 @@ fs.writeFileSync(fakeBin, [
 ].join('\n') + '\n');
 fs.chmodSync(fakeBin, 0o755);
 fs.symlinkSync(fakeBin, path.join(tmp, 'bin', 'dsh'));
-// Fake `open`: counts browser opens without touching a real desktop.
-const fakeOpen = path.join(tmp, 'bin', 'open');
-fs.writeFileSync(fakeOpen, '#!/bin/sh\necho "$*" >> ' + JSON.stringify(openMarker) + '\n');
-fs.chmodSync(fakeOpen, 0o755);
+// Fake browser opener: counts opens without touching a real desktop.
+// openBrowser() spawns `open` on darwin and `xdg-open` on linux, so BOTH names
+// must be shadowed inside tmp/bin. Faking only `open` made every open-count
+// assertion vacuous on linux CI — the positive one ("a new generation opens
+// once") went red (before=0 after=0) while the negative ones passed for the
+// wrong reason. The first v0.1.30 publish attempt failed exactly there.
+const openerScript = '#!/bin/sh\necho "$*" >> ' + JSON.stringify(openMarker) + '\n';
+for (const name of ['open', 'xdg-open']) {
+  const p = path.join(tmp, 'bin', name);
+  fs.writeFileSync(p, openerScript);
+  fs.chmodSync(p, 0o755);
+}
 
 function makeCtx(registered) {
   const shell = {
