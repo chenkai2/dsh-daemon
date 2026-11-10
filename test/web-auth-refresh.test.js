@@ -14,7 +14,8 @@
 //   A  --restart waits for the token, persists the NEW one, and the CLI seed
 //      path itself writes `.web-auth-opened`
 //   B  `.dsh-web.logoffset` anchors the run; status says "stale" (template and
-//      plugin); B3: a base past EOF must not lie either
+//      plugin); B3: a base past EOF must fall back to the whole file
+//      (= this run) and never report a foreign token
 //   C  the resident watchdog self-heals a lost .web-auth-url without a 2nd popup
 //   D  browser open is throttled per GENERATION, not per process
 //   E  --restart with no token line terminates fast with
@@ -329,22 +330,51 @@ function makeCtx(registered) {
     check('B 模板 --status 不含 valid while this web process runs',
       !/valid while this web process runs/.test(b.out), brief(b.out, 6));
 
-    // ===== B3: a run anchor past EOF (log truncated / rotated) =============
-    // dsh-web.log can shrink under the watchdog (rotation, a recreated log on
-    // win32). `base > WEB_LOG.size` must degrade to "no current-run token",
-    // never to a crash and never to a "valid" claim.
+    // ===== B3: a run anchor past EOF — the truncated-log fallback ==========
+    // What this pins: `.dsh-web.logoffset.base > WEB_LOG.size` is what a rotated
+    // or recreated dsh-web.log looks like (win32 Start-Process overwrites the log
+    // per run). The run anchor must then fall back to `start = 0` — "the whole
+    // file IS this run" — and report the LAST token line of it. So the contract
+    // here is: no crash, one of the three honest verdicts, and above all NO
+    // FOREIGN TOKEN: a token from another process must never be presented as the
+    // current URL.
+    //
+    // The `started` stamp MUST be the real `.dsh-web.started`, not a fresh
+    // Date.now(): runLogBase() drops an anchor whose `started` does not match the
+    // current generation, and then lastTokenUrlSince() never runs at all — the
+    // assertions would pass for the wrong reason and the truncation path would
+    // stay untested.
     const goodOffset = readDaemon('.dsh-web.logoffset');
+    const goodAuthUrl = readDaemon('.web-auth-url');
+    const startedReal = Number(genStarted());
     const hugeBase = Math.max(1024 * 1024, (offA ? offA.base : 0) + 8 * 1024 * 1024);
+    check('B3 前置：.dsh-web.started 是真实时间戳（否则走不到截断兜底分支）', startedReal > 0,
+      '.dsh-web.started=' + JSON.stringify(genStarted()) + ' .dsh-web.logoffset=' + JSON.stringify(goodOffset));
     fs.writeFileSync(daemonFile('.dsh-web.logoffset'),
-      JSON.stringify({ base: hugeBase, started: Date.now() }) + '\n');
+      JSON.stringify({ base: hugeBase, started: startedReal }) + '\n');
+    // Record the CURRENT token: with `start = 0` the last token line of the file
+    // IS this generation's line, so whatever the verdict echoes must be it.
+    fs.writeFileSync(daemonFile('.web-auth-url'), (aExpect || '') + '\n');
     const b3 = await runCli(['--status'], {}, 40000);
-    check('B3 logoffset.base > WEB_LOG.size 时 --status 不崩（退出码 0）',
-      !b3.timedOut && b3.code === 0, 'code=' + b3.code + ' signal=' + b3.signal + ' err=' + brief(b3.err) + ' out=' + brief(b3.out));
-    check('B3 截断后的 base 不误报 valid while this web process runs',
-      !/valid while this web process runs/.test(b3.out), brief(b3.out, 6));
-    check('B3 输出退化为 not captured 或 stale', /not captured|stale/.test(b3.out), brief(b3.out, 6));
+    // Post-write only; a verdict branch is NOT required (requiring
+    // "not captured"/"stale" would contradict the `st.size < base ? 0 : base`
+    // fallback that must stay for the win32 overwrite semantics).
+    const b3State = /valid while this web process runs/.test(b3.out) ? 'valid'
+      : /not captured/.test(b3.out) ? 'not captured'
+        : /\bstale\b/.test(b3.out) ? 'stale' : 'none';
+    const b3Urls = b3.out.match(/https?:\/\/\S*?token=\S+/g) || [];
+    check('B3 base > WEB_LOG.size（日志被截断/轮转）时 --status 不崩（退出码 0）',
+      !b3.timedOut && b3.code === 0,
+      'code=' + b3.code + ' signal=' + b3.signal + ' err=' + brief(b3.err) + ' out=' + brief(b3.out));
+    check('B3 输出是三种状态之一（valid / stale / not captured）', b3State !== 'none',
+      'state=' + b3State + ' out=' + brief(b3.out, 6));
+    check('B3 报出的 token URL 只能是本代真实 token（不得把别的进程的 token 当 current）',
+      !!aExpect && b3Urls.every((u) => u.indexOf(aExpect) >= 0),
+      'state=' + b3State + ' echoed=' + JSON.stringify(b3Urls) + ' expect=' + aExpect + ' out=' + brief(b3.out, 6));
+    console.log('     (B3 走了 ' + b3State + ' 分支，base=' + hugeBase + ' > log size, started=真实值)');
     // C relies on the REAL anchor to know the current run's token.
     fs.writeFileSync(daemonFile('.dsh-web.logoffset'), goodOffset);
+    fs.writeFileSync(daemonFile('.web-auth-url'), goodAuthUrl);
 
     // ===== C: resident watchdog self-heals a lost .web-auth-url ============
     const opensBeforeHeal = opens().length;
