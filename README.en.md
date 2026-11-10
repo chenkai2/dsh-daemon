@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.31 | **0.1.x and 0.2.x** | Fixes "`/health` 404 ⇒ endless restarts, and one browser tab per restart": `/health` is a route **this plugin registers itself**, so when the plugin is not active in the profile the daemon launches (wrong profile / failed activation / missing entry in that profile's `cordis.yml`) it is always 404 — and the watchdog then restarts roughly every 5 minutes, each restart being a new generation, which the per-generation throttle lets open one browser tab again. Liveness is now decided by a **core** static asset: `GET /manifest.webmanifest` returns 200 (or `/` returns 200/301/302/401/403, i.e. the core auth fence answers) ⇒ dsh itself is alive. `/health` 404 **and** core alive ⇒ the plugin is not serving and a restart cannot load it ⇒ **stop restarting**, record `.daemon-pluginless`, and make both `status` and the `dsh_daemon_status` tool state the actionable cause (`dsh_daemon_reinstall`); core dead too (refused/timeout/all-404) ⇒ the original restart policy applies |
 | 0.1.30 | **0.1.x and 0.2.x** | Fixes "the Web auth URL in `status` never changes": `dsh web` prints its token line only **after the plugin loader settles**, while `/health` answers much earlier — so a one-shot CLI (`restart`/`start`/`restart-pending`) called `process.exit()` the moment the health probe returned and dropped `seedWebAuth()`'s polling timers (no `.web-auth-url` write, no log line, not even the 90 s timeout line), and the resident watchdog never re-seeded; the URL stayed pinned to a dead token yet was still labelled `valid while this web process runs`. Now: the seed chain is awaitable (bounded per CLI invocation via `DSH_DAEMON_AUTH_WAIT`, seconds, default 20, then it exits with a `not captured yet` note and the next healthy tick fills it in); a per-generation log anchor `.dsh-web.logoffset` keeps older tokens out of "current" (backwards chunked scan, ≤8 MB); the resident watchdog self-heals the URL on every healthy tick (once per generation, single-flight); the browser is throttled per **web generation** via `.web-auth-opened`; both `dsh-daemon status` and the `dsh_daemon_status` tool only claim `valid` for the running process and otherwise report `stale` / `not captured yet` (the tool had no such line at all) |
 | 0.1.29 | **0.1.x and 0.2.x** | dsh compatibility gate for auto-update: every release declares `dsh.requires.dsh`, and the updater compares it with the installed dsh version — **unsatisfied / undeclared / unreadable dsh version skips the automatic update** (a human can force it with `dsh-daemon update --apply`); the registry probe now retries twice with a 15 s budget and classifies failures (timeout / DNS / HTTP / connection), and `status` shows the last successful check |
 | 0.1.28 | **0.1.x and 0.2.x** | Fixes health-check false kills and the restart storm: per-probe `/health` budget 5 s → **20 s**, failure threshold 3 → **5** (~50 s of real misses before a restart); serialized ticks (`tickBusy`) plus a single-flight `launch()` so two dsh web processes can no longer be spawned in the same second (`EADDRINUSE`); **adopts** an unmanaged dsh web that already serves the port (corrects the pid file) instead of launching a second one; verifies that a PID really is a dsh web before signalling it (no more killing a recycled PID); `status` reports a pid-file/listener mismatch; refuses non-JS entries (`dsh.ps1`/`.cmd` shims) with a clear error |
@@ -323,6 +324,78 @@ node test/logs-command.test.js                  # 10s tick default + dsh-daemon 
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.31 — `/health` 404 no longer means endless restarts (and one browser tab per restart)
+
+**What happened**: with a brand-new empty `DSH_HOME`, `dsh_daemon_install` left a
+`http://127.0.0.1:3099/?token=…` tab popping up on the desktop about every five minutes until the
+processes were killed by hand.
+
+**Why**: `/health` is **not** a dsh route — this plugin registers it itself
+(`ctx.webServer.register('/health')`). When the plugin is not active in the profile the daemon
+launches, the route simply does not exist ⇒ `/health` is always **404** ⇒ `healthy()` is always
+false ⇒ the watchdog follows the "web is down" script: startup grace expires → 5 failures → graceful
+stop and relaunch → a **new generation** → a new token → the per-generation throttle opens one more
+browser tab. Cycle ≈ 5 min grace + 5×10 s ≈ 5m50s, exactly the "every so often" the user saw. In the
+wild, any machine whose profile does not have the plugin active (wrong profile, failed activation,
+missing `cordis.yml` entry) hits this — and `status` only said `still starting` / `unhealthy`, which
+hides the real cause while restarting makes it worse.
+
+**The verdict now comes from positive evidence in dsh core** (`/health` is ours, so it cannot prove
+dsh is alive). Measured on this machine without a cookie:
+
+| Path | Status | Why it matters |
+|---|---|---|
+| `/health` | 200 `application/json` | ours — 404 whenever the plugin is absent |
+| `/manifest.webmanifest` | 200 `application/manifest+json` | served by core `frontend-static`, no cookie |
+| `/` | 401 `text/plain` | the core auth fence answering ⇒ dsh is alive |
+| `/favicon.ico`, `/nope` | 404 | missing file ⇒ 404, unusable as a signal |
+
+So each tick now classifies:
+
+- `/health` 404 **and** `coreProbe()` alive (manifest 200, or `/` ∈ {200,301,302,401,403}) ⇒
+  **the plugin is not serving and a restart cannot load it** ⇒ do not restart, record
+  `~/.dsh/daemon/.daemon-pluginless`, log once, `return`;
+- `coreProbe()` dead too (refused / timeout / 5xx / all-404) ⇒ dsh really is not serving ⇒ the
+  **original policy applies unchanged** (thresholds untouched);
+- `/health` 5xx or timeout while core is alive ⇒ original policy.
+
+Not restarting also means no new generation, which is what removes the tab popping — on this path
+"stop restarting" and "stop popping tabs" are the same thing. The earlier "allow one restart to rule
+out a transient activation failure" counter was **deleted**: positive evidence needs one
+confirmation, and in a pure-404 flow it could never actually fire (two ticks reached the give-up
+branch before the threshold), so it only made the log lie.
+
+**`status` tells the truth** (the template `printStatus()` and the plugin's `doStatus()` share one
+`pluginlessStatusLine()`, injected via `toString()`, so the wording exists in exactly one place):
+
+```
+   Web server: ⚠️  alive but /health is 404 on 127.0.0.1:3080 (PID 12345) — the dsh-daemon
+   plugin is not active in the profile this daemon launches, so restarting cannot fix it;
+   fix: dsh_daemon_reinstall (details: dsh-daemon logs)
+```
+
+**This is a deliberate fail-safe**: dsh web itself is still serving (only our liveness route is
+missing), so giving up automatic restarts does not take the service away. Fix the profile (reinstall
+the daemon into the right one) and run `dsh-daemon restart`. When `/health` turns 200 again the state
+file is cleared automatically, so the verdict is never a one-way latch; it is also removed on uninstall.
+
+Two things that are easy to misread:
+
+- **Real faults still restart as before**: the process exiting, connection refused, or `/health`
+  returning 5xx / timing out (even while core is alive) all go through the original
+  threshold-and-restart policy — giving up happens **only** in the single combination "/health is 404
+  *and* a core static asset answers";
+- `.daemon-pluginless` records the **observation** only: `port` / `code` / `since` (the moment the
+  daemon first gave up, snapshot semantics). **No PID is stored** — both verdicts always print the
+  live PID, so you are never shown a dead (and possibly recycled) one. The file is rewritten when the
+  port changes.
+
+**Regression test** `test/pluginless-health.test.js`: a fake web serves
+`manifest 200 + /health 404` (pluginless ⇒ exactly one start, state file written, both status lines
+identical, ≤1 tab), `manifest 200 + /health 503` (real fault ⇒ restarts as before, ≥2), and
+`manifest 404 + / 404 + /health 404` (**the port is held by a non-dsh process ⇒ must still restart
+≥2 times**, guarding against a verdict so loose that the daemon dead-locks).
 
 ### v0.1.30 — the `status` Web auth URL no longer stays pinned to a dead token
 
