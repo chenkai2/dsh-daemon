@@ -307,6 +307,13 @@ watchdog 按「web 挂了」的剧本走：5 分钟启动宽限到期 → 累计
 失去服务；修好 profile（重新 `dsh_daemon_reinstall` 到正确的 profile）后再 `dsh-daemon restart` 即恢复。
 `/health` 重新变 200 时状态文件会被自动清掉，判定不会永久锁死。卸载时该文件一并删除。
 
+两个容易误解的点：
+
+- **真故障仍然照旧重启**：进程退出、连接被拒、`/health` 返回 5xx 或超时（即使核心活着），一律走原阈值/重启策略 ——
+  停止重启**只**发生在「`/health` 是 404 且核心静态资源在答」这一个组合上；
+- `.daemon-pluginless` 只记录**现象**：`port` / `code` / `since`（**首次放弃的时刻**，快照语义）。**PID 不入库**，
+  两处判词一律显示实时 PID，避免给你一个已经死掉、甚至可能被内核复用的 PID。换端口时该文件会被重写。
+
 **回归测试** `test/pluginless-health.test.js`：假 web 分别提供
 `manifest 200 + /health 404`（插件缺席 ⇒ 只启动 1 次、写状态文件、两处判词行一致、弹窗 ≤1）、
 `manifest 200 + /health 503`（真故障 ⇒ 照旧重启 ≥2 次）、

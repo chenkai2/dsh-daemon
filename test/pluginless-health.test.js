@@ -30,6 +30,15 @@
 //      starts) and must never be classified as pluginless. I guards the
 //      dangerous direction of this change: an over-wide liveness criterion
 //      would wedge the watchdog into never restarting again.
+//   J  /manifest.webmanifest 404 but / answers 401 => the generous / rule calls
+//      this "dsh is alive", so it is classified pluginless and the loop stops.
+//      That is a DELIBERATE, known-wide trade-off; J pins it so the accepted
+//      width is tested instead of being an untested blank.
+//   K  the give-up verdict must describe the RUNNING dsh web: after a restart it
+//      has to name the live PID, and a recorded port that no longer matches must
+//      not hide the verdict.
+//   L  a fresh watchdog (boot / self-restart) must not relaunch dsh web while the
+//      give-up state says the plugin is absent — no new generation, no new tab.
 //
 // The plugin is loaded in DYNAMIC SANDBOX mode (`new Function('ctx','harness',
 // src)`), never `require('lib/index.js')`: the static path pulls
@@ -63,8 +72,9 @@ const OBSERVE_MS = 60000;
 const ANCHOR_WAIT_MS = 45000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Debug/verification knob: `PLUGINLESS_CASES=I node test/pluginless-health.test.js`
-// runs a subset (used to prove case I discriminates a too-wide liveness probe).
-const CASES = String(process.env.PLUGINLESS_CASES || 'G,H,I')
+// runs a subset (used to prove case I discriminates a too-wide liveness probe,
+// and to verify K/L against a candidate fix on their own).
+const CASES = String(process.env.PLUGINLESS_CASES || 'G,H,I,J,K,L')
   .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
 const want = (name) => CASES.indexOf(name) >= 0;
 
@@ -115,6 +125,19 @@ function verdictLines(text) {
   return String(text || '').split('\n').filter((l) => l.indexOf('Web server:') >= 0);
 }
 const VERDICT_ALIVE_404 = 'alive but /health is 404';
+// The give-up line: it has to carry `/health is 404` AND `not restarting` on the
+// SAME line. `not restarting` alone is not unique in this log (a pre-grace tick
+// legitimately logs `dsh web still starting (Ns of Ns grace, PID …) — not
+// restarting`), so both use cases (the G/J anchor and G2's assertion) look at
+// the 404 line only.
+const GIVE_UP_LINE_MATCH = (text) => String(text || '').split('\n')
+  .some((l) => l.indexOf('/health is 404') >= 0 && l.indexOf('not restarting') >= 0);
+// The PID a status verdict names, or 0 when it names none.
+function verdictPidFrom(text) {
+  const line = verdictLines(text)[0] || '';
+  const m = line.match(/\(PID (\d+)\)/);
+  return m ? Number(m[1]) : 0;
+}
 const PLUGIN_NOT_ACTIVE = 'the dsh-daemon plugin is not active in the profile this daemon launches';
 // Probe one path on the fake web. Returns the HTTP status, or 0 when nothing
 // answered (which also distinguishes "listening but 404" from "port dead").
@@ -357,6 +380,23 @@ async function runWindow(label, codes, anchorFn) {
     allStarts: starts().length,
   };
 }
+// Bring the sandbox to G's end state (give-up state on disk, the fake web still
+// alive) without a full 60s window: K and L are about the status text and about
+// the NEXT watchdog's startup decision, not about long-run stability (G and J
+// cover that). The give-up line is the anchor, so nothing here bets on a sleep.
+async function establishPluginless() {
+  await reap(resident); resident = null;
+  await killWatchdogs();
+  await killWebs();
+  try { fs.unlinkSync(pluginlessState); } catch (e) { /* absent */ }
+  Object.assign(process.env, { FAKE_MANIFEST: '200', FAKE_ROOT: '401', FAKE_HEALTH: '404', FAKE_OTHER: '200' });
+  const base = { starts: starts().length, opens: opens().length, log: logText().length };
+  resident = startResident();
+  const up = await waitFor(() => starts().length > base.starts, 20000);
+  const anchored = await waitFor(() => GIVE_UP_LINE_MATCH(logText().slice(base.log)), ANCHOR_WAIT_MS);
+  return { up, anchored, state: readPluginless(), base };
+}
+
 (async () => {
   try {
     Object.assign(process.env, {
@@ -409,14 +449,21 @@ async function runWindow(label, codes, anchorFn) {
     await killWatchdogs();
     await killWebs();
 
+    // ---- negative-space wiring (NB7) --------------------------------------
+    // parsePluginlessState() and pluginlessStatusLine() reach the generated
+    // script through Function.prototype.toString(), so they MUST stay function
+    // DECLARATIONS. Turning one into an arrow (or `const f = () => …`) emits
+    // broken code into a 1000-line generated script, and that only surfaces at
+    // runtime minutes later — assert the shape here instead.
+    const genSrc = fs.readFileSync(watchdogJs, 'utf8');
+    check('W1 the generated watchdog injects `function parsePluginlessState` (toString() needs a declaration)',
+      /function parsePluginlessState\s*\(/.test(genSrc), 'genSrc bytes=' + genSrc.length);
+    check('W2 the generated watchdog injects `function pluginlessStatusLine` (same reason)',
+      /function pluginlessStatusLine\s*\(/.test(genSrc), 'genSrc bytes=' + genSrc.length);
+
     // ===== G: dsh web alive (manifest 200), our /health is 404 =============
-    // Anchored on the give-up line itself, so "no new start afterwards" means
-    // the decision fired and held. The `not restarting` substring is NOT unique
-    // in this log (a pre-grace tick legitimately logs `dsh web still starting
-    // (Ns of Ns grace, PID …) — not restarting`), so the anchor requires the
-    // substring ON THE 404 LINE.
-    const GIVE_UP_LINE_MATCH = (text) => text.split('\n')
-      .some((l) => l.indexOf('/health is 404') >= 0 && l.indexOf('not restarting') >= 0);
+    // Anchored on the give-up line itself (GIVE_UP_LINE_MATCH), so "no new start
+    // afterwards" means the decision fired and held.
     if (want('G')) {
       const g = await runWindow('G', { FAKE_MANIFEST: '200', FAKE_ROOT: '401', FAKE_HEALTH: '404', FAKE_OTHER: '200' },
         (b) => GIVE_UP_LINE_MATCH(logText().slice(b.log)));
@@ -528,6 +575,141 @@ async function runWindow(label, codes, anchorFn) {
       check('I5 status does not claim the pluginless verdict either',
         iVerdicts.length === 1 && iVerdicts[0].indexOf(VERDICT_ALIVE_404) < 0,
         'verdicts=' + JSON.stringify(iVerdicts));
+    }
+
+    // ===== J: the ACCEPTED-WIDE side of the criterion ======================
+    // /manifest.webmanifest 404 but / answers 401. The generous / rule (401/403
+    // count as "the core auth fence answered") treats this as dsh being alive,
+    // so the combination is classified pluginless and the loop stops. That is a
+    // deliberate trade-off — on a real host it additionally requires OUR web
+    // process to still be alive — and this case exists so the width is tested
+    // instead of untested: narrowing the rule later turns J red and sends the
+    // decision back to a human.
+    if (want('J')) {
+      const j = await runWindow('J', { FAKE_MANIFEST: '404', FAKE_ROOT: '401', FAKE_HEALTH: '404', FAKE_OTHER: '200' },
+        (b) => GIVE_UP_LINE_MATCH(logText().slice(b.log)));
+      check('J precondition: /manifest.webmanifest=404 while /=401 and /health=404',
+        j.up && j.probed['/manifest.webmanifest'] === 404 && j.probed['/'] === 401 && j.probed['/health'] === 404,
+        'listening=' + j.up + ' probed=' + JSON.stringify(j.probed));
+      check('J1 KNOWN-WIDE rule (deliberately accepted): a 401 on / still counts as liveness => start events === 1',
+        j.anchored && j.starts === 1,
+        'anchored=' + j.anchored + ' starts=' + j.starts + ' events=' + JSON.stringify(webEvents().slice(-5)));
+      check('J2 the give-up state is written for this combination too',
+        !!j.state && j.state.code === 404,
+        'raw=' + (j.stateExists ? JSON.stringify(readDaemon('.daemon-pluginless')) : '<absent>'));
+      const jVerdicts = verdictLines((await runCli(['--status'], 60000)).out);
+      check('J3 the verdict says `alive but /health is 404`',
+        jVerdicts.length === 1 && jVerdicts[0].indexOf(VERDICT_ALIVE_404) >= 0,
+        'verdicts=' + JSON.stringify(jVerdicts));
+    }
+
+    // ===== K: the give-up verdict must describe the RUNNING dsh web =========
+    // The give-up state is a fact about the PLUGIN being absent, not about one
+    // process. Pinning the PID that happened to be there when the watchdog gave
+    // up makes both status paths advertise a dead process after any restart.
+    if (want('K')) {
+      const setupK = await establishPluginless();
+      const oldPid = pidFromFile('.dsh-web.pid');
+      const cliBefore = await runCli(['--status'], 60000);
+      const verdictPidBefore = verdictPidFrom(cliBefore.out);
+      check('K precondition: give-up state present and its verdict names the running web',
+        setupK.anchored && !!setupK.state && verdictPidBefore > 0 && verdictPidBefore === oldPid,
+        'anchored=' + setupK.anchored + ' state=' + JSON.stringify(setupK.state)
+        + ' verdictPid=' + verdictPidBefore + ' webPid=' + oldPid
+        + ' verdicts=' + JSON.stringify(verdictLines(cliBefore.out)));
+
+      // The one-shot CLI must be the only launcher, and the previous generation
+      // has to be older than MIN_RESTART_GAP_MS (15s) or doLaunch() silently
+      // skips the restart and K would fail for the wrong reason.
+      await reap(resident); resident = null;
+      await killWatchdogs();
+      const due = (Number(readDaemon('.dsh-web.started')) || 0) + 15500;
+      await waitFor(() => Date.now() >= due, Math.max(0, due - Date.now()) + 5000);
+
+      const r = await runCli(['--restart'], 120000);
+      const newPid = pidFromFile('.dsh-web.pid');
+      // Exit code is 1 here BY DESIGN: `--restart` reports "not healthy yet",
+      // and /health is 404 in this sandbox. What K needs is the new generation.
+      check('K1 --restart produced a NEW generation (a different live web process)',
+        !r.timedOut && newPid > 0 && newPid !== oldPid,
+        'code=' + r.code + ' ms=' + r.ms + ' oldPid=' + oldPid + ' newPid=' + newPid + ' out=' + brief(r.out, 4));
+
+      const cliAfter = await runCli(['--status'], 60000);
+      const plugAfter = String(await statusTool.execute({}, {}));
+      const cliV = verdictLines(cliAfter.out);
+      const plugV = verdictLines(plugAfter);
+      check('K2 the give-up verdict is still the verdict after the restart (plugin still absent)',
+        cliV.length === 1 && cliV[0].indexOf(VERDICT_ALIVE_404) >= 0
+        && plugV.length === 1 && plugV[0].indexOf(VERDICT_ALIVE_404) >= 0,
+        'cli=' + JSON.stringify(cliV) + ' || plugin=' + JSON.stringify(plugV));
+      check('K3 template `--status` names the LIVE pid (' + newPid + '), not the stored one (' + verdictPidBefore + ')',
+        cliV.length === 1 && cliV[0].indexOf('(PID ' + newPid + ')') >= 0
+        && cliV[0].indexOf('(PID ' + verdictPidBefore + ')') < 0,
+        'cli=' + JSON.stringify(cliV));
+      check('K3b plugin dsh_daemon_status names the LIVE pid too',
+        plugV.length === 1 && plugV[0].indexOf('(PID ' + newPid + ')') >= 0
+        && plugV[0].indexOf('(PID ' + verdictPidBefore + ')') < 0,
+        'plugin=' + JSON.stringify(plugV));
+
+      // A recorded port that no longer matches the daemon must not hide the
+      // verdict. What matters is the user-visible outcome — the verdict stays —
+      // not whether the implementation rewrites the file or ignores the field.
+      const corrupted = Object.assign({}, setupK.state || {}, { code: 404, port: PORT + 1 });
+      fs.writeFileSync(pluginlessState, JSON.stringify(corrupted) + '\n');
+      const cliStale = await runCli(['--status'], 60000);
+      const staleV = verdictLines(cliStale.out);
+      check('K4 a foreign recorded port does not hide the verdict (rewritten, or the field ignored)',
+        staleV.length === 1 && staleV[0].indexOf(VERDICT_ALIVE_404) >= 0,
+        'state=' + JSON.stringify(readDaemon('.daemon-pluginless')) + ' verdicts=' + JSON.stringify(staleV));
+      console.log('     (K4 state after --status: ' + String(readDaemon('.daemon-pluginless')).trim() + ')');
+    }
+
+    // ===== L: a fresh watchdog must not pop a residual tab =================
+    // Incident shape #2: a boot (or a watchdog self-restart) relaunched dsh web
+    // while the plugin was still absent => new generation => one more tab. With
+    // the give-up state on disk and dsh web alive, a NEW watchdog must leave the
+    // running web alone instead of minting generation #2.
+    if (want('L')) {
+      const setupL = await establishPluginless();
+      check('L precondition: give-up state recorded while dsh web keeps answering core assets',
+        setupL.anchored && !!setupL.state && fs.existsSync(pluginlessState),
+        'anchored=' + setupL.anchored + ' state=' + JSON.stringify(setupL.state));
+      // "Boot": stop the current supervisor, leave the web running, start a brand
+      // new watchdog process against the same on-disk state.
+      await reap(resident); resident = null;
+      await killWatchdogs();
+      // Wait out MIN_RESTART_GAP_MS (15s) FIRST. Without this the pre-fix build
+      // also refuses to launch here — by throttle, not by the give-up state — and
+      // L would pass for the wrong reason (verified against the pre-fix commit).
+      const dueL = (Number(readDaemon('.dsh-web.started')) || 0) + 15500;
+      await waitFor(() => Date.now() >= dueL, Math.max(0, dueL - Date.now()) + 5000);
+      const startsBefore = starts().length;
+      const opensBefore = opens().length;
+      const logAt = logText().length;
+      const webPid = pidFromFile('.dsh-web.pid');
+      resident = startResident();
+      const tBoot = Date.now();
+      // The anchor is the startup guard's own line (`not launching`), NOT the
+      // tick's give-up line: `plugin is not active in the profile` also appears
+      // in the re-logged 404 message, which would make this vacuous.
+      const anchored = await waitFor(
+        () => /not launching/i.test(logText().slice(logAt)), ANCHOR_WAIT_MS);
+      // Keep watching a few ticks AFTER the decision line: a launch would come
+      // from a later tick, not from the line itself.
+      await waitFor(() => Date.now() - tBoot >= 15000, 20000);
+      check('L1 the restarted watchdog says why it is not launching (positive anchor)',
+        anchored, 'tail=' + brief(logText().slice(logAt), 8));
+      check('L2 no new generation: no `start` event after the watchdog restart',
+        anchored && starts().length === startsBefore,
+        'anchored=' + anchored + ' starts=' + startsBefore + '->' + starts().length
+        + ' events=' + JSON.stringify(webEvents().slice(-4)));
+      check('L3 no residual browser tab: open count unchanged',
+        anchored && opens().length === opensBefore,
+        'anchored=' + anchored + ' opens=' + opensBefore + '->' + opens().length
+        + ' lines=' + JSON.stringify(opens().slice(-3)));
+      check('L4 the running dsh web was left alone (same PID)',
+        anchored && pidFromFile('.dsh-web.pid') === webPid,
+        'webPid=' + webPid + ' now=' + pidFromFile('.dsh-web.pid'));
     }
   } catch (e) {
     failures += 1;

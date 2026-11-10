@@ -380,6 +380,17 @@ missing), so giving up automatic restarts does not take the service away. Fix th
 the daemon into the right one) and run `dsh-daemon restart`. When `/health` turns 200 again the state
 file is cleared automatically, so the verdict is never a one-way latch; it is also removed on uninstall.
 
+Two things that are easy to misread:
+
+- **Real faults still restart as before**: the process exiting, connection refused, or `/health`
+  returning 5xx / timing out (even while core is alive) all go through the original
+  threshold-and-restart policy — giving up happens **only** in the single combination "/health is 404
+  *and* a core static asset answers";
+- `.daemon-pluginless` records the **observation** only: `port` / `code` / `since` (the moment the
+  daemon first gave up, snapshot semantics). **No PID is stored** — both verdicts always print the
+  live PID, so you are never shown a dead (and possibly recycled) one. The file is rewritten when the
+  port changes.
+
 **Regression test** `test/pluginless-health.test.js`: a fake web serves
 `manifest 200 + /health 404` (pluginless ⇒ exactly one start, state file written, both status lines
 identical, ≤1 tab), `manifest 200 + /health 503` (real fault ⇒ restarts as before, ≥2), and
