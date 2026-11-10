@@ -689,11 +689,16 @@ async function establishPluginless() {
       const webPid = pidFromFile('.dsh-web.pid');
       resident = startResident();
       const tBoot = Date.now();
-      // The anchor is the startup guard's own line (`not launching`), NOT the
-      // tick's give-up line: `plugin is not active in the profile` also appears
-      // in the re-logged 404 message, which would make this vacuous.
+      // The anchor is the startup guard's OWN line: `previous run still applies`
+      // appears only in pluginlessApplies()'s skip message. Two earlier
+      // candidates were non-exclusive and both produced false greens:
+      //   * `not launching`  — also in "port N is held by an unmanaged process —
+      //     not launching a second dsh web", i.e. a DIFFERENT mechanism
+      //     (unmanaged listener) could satisfy it while the guard was deleted;
+      //   * `plugin is not active in the profile` — re-logged by the give-up
+      //     tick, so it matched the tick's own output rather than a boot skip.
       const anchored = await waitFor(
-        () => /not launching/i.test(logText().slice(logAt)), ANCHOR_WAIT_MS);
+        () => /previous run still applies/i.test(logText().slice(logAt)), ANCHOR_WAIT_MS);
       // Keep watching a few ticks AFTER the decision line: a launch would come
       // from a later tick, not from the line itself.
       await waitFor(() => Date.now() - tBoot >= 15000, 20000);
