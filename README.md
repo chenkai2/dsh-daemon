@@ -301,6 +301,18 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
   `⏳ not captured yet`。工具侧此前**完全没有**这一行，这次一并补上。
   另外插件自己的 `dsh_daemon_start` 直启路径也会写同一份 `.dsh-web.logoffset` 锚点。
 
+**升级/交接时的两个过渡态（都属正常，看到别以为又坏了）**
+
+- 升级到 0.1.30 时老 watchdog 脚本不带锚点，`.dsh-web.logoffset` 要等**下一次 launch** 才写出来。
+  这期间 `status` 会如实说 `stale` / `not captured yet`，`ensureWebAuth()` 也刻意**不动手**
+  （锚点缺失时一律回答「不知道」，绝不拿旧代 token 充数）。跑一次 `dsh-daemon restart` 即可补齐；
+- **收养别人的进程时锚点归零**：watchdog 会收养不是自己拉起的 `dsh web`（守护进程崩了之后手动起的、
+  或 `launch()` 竞态下的 winner）。此时它把这个实例当作**新的一代**，把 `.dsh-web.logoffset` 重置成
+  空窗口并更新 `.dsh-web.started`，于是 `status` 报 `not captured yet`。这是刻意的：手动 `dsh web`
+  的 token 打在**终端**里、根本不进 `dsh-web.log`，daemon 拿不到 —— 宁可说「不知道」，也不能把
+  上一代的死 token 标成 `valid while this web process runs`。这一条正是上面那个 bug 的**最后一条
+  可达路径**（v0.1.30 首次实现漏掉了它，CR 阶段被 reviewer 用沙箱复现后补上）。
+
 **回归测试** `test/web-auth-refresh.test.js`（已进 `npm test` 与 `test:ci`）：假 `dsh web` 精确复刻
 上游时序（`/health` 立刻 200、token 行延迟 3s）后用**真实生成的 watchdog** 跑 A–E 五组用例 ——
 `--restart` 必须等到并落盘新 token、`.web-auth-opened` 必须由 CLI 的 seed 路径写出、

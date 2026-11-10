@@ -19,6 +19,11 @@
 //   D  browser open is throttled per GENERATION, not per process
 //   E  --restart with no token line terminates fast with
 //      `Web auth URL: not captured yet ...` within AUTH_WAIT (default 20s)
+//   N7 `--start` resumes a stopped daemon (waits for the token) and early-exits
+//      when the web is already healthy; --restart-pending is wiring-only (its
+//      quiet window is 5min, see N7c)
+//   F  a dsh web the watchdog did NOT launch (manual `dsh web`) is adopted
+//      without resurrecting the previous generation's dead token (B1)
 'use strict';
 const fs = require('node:fs');
 const os = require('node:os');
@@ -91,6 +96,7 @@ function readOffset() {
     return { base: Number(o.base), started: Number(o.started) };
   } catch (e) { return null; }
 }
+function webLogText() { try { return fs.readFileSync(webLog, 'utf8'); } catch (e) { return ''; } }
 function webLogFrom(base) {
   try { const text = fs.readFileSync(webLog, 'utf8'); return text.slice(base); } catch (e) { return ''; }
 }
@@ -218,6 +224,7 @@ function makeCtx(registered) {
 
 (async () => {
   let residentWatchdog = null;
+  let manualWeb = null;   // fake `dsh web` the watchdog did NOT launch (test F)
   try {
     Object.assign(process.env, {
       HOME: home, DSH_HOME: dshHome,
@@ -266,6 +273,7 @@ function makeCtx(registered) {
     check('基线：watchdog/web 已停，端口空出', !alive(gen1Pid));
 
     // ===== A: --restart must capture the token printed AFTER /health =======
+    const opensBeforeA = opens().length;
     const a = await runCli(['--restart'], {}, 40000);
     const aToken = tokenInfo();
     const aPid = pidFromFile('.dsh-web.pid');
@@ -286,7 +294,9 @@ function makeCtx(registered) {
     // This is what keeps `.web-auth-opened` from being an ensureWebAuth-only
     // side effect that the CLI path silently skips.
     await waitFor(() => readDaemon('.web-auth-opened').trim() !== '', 5000);
-    await waitFor(() => opens().length > 0, 5000); // openBrowser spawns detached
+    // openBrowser spawns `open` detached, so its counter line can land a moment
+    // after the CLI exits — wait for THIS generation's open, never for "> 0".
+    await waitFor(() => opens().length === opensBeforeA + 1, 5000);
     const openedAfterA = readDaemon('.web-auth-opened').trim();
     const startedA = genStarted();
     check('A .web-auth-opened 由 CLI seed 路径写出（不是只有常驻 watchdog 才写）',
@@ -339,6 +349,7 @@ function makeCtx(registered) {
     // ===== C: resident watchdog self-heals a lost .web-auth-url ============
     const opensBeforeHeal = opens().length;
     const startsBeforeC = starts().length;
+    const logBeforeHeal = logText().length;
     try { fs.unlinkSync(daemonFile('.web-auth-url')); } catch (e) { /* absent */ }
     residentWatchdog = spawn(process.execPath, [watchdogJs], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let wdOut = '';
@@ -350,7 +361,13 @@ function makeCtx(registered) {
     check('C 自愈没有重启 web（start 事件数不变）', starts().length === startsBeforeC,
       'before=' + startsBeforeC + ' after=' + starts().length + ' events=' + JSON.stringify(webEvents().slice(-4)));
     // A self-heal re-seeds the SAME generation: it must not pop a second tab.
-    await sleep(300); // give a (wrong) detached open time to land before counting
+    // Anchor this NEGATIVE assertion on an observed decision line, never on a
+    // sleep: the seed logs "… skipping browser" exactly when the throttle says
+    // no, so if that line never appears the heal never went through the
+    // throttle at all (a late second popup would otherwise slip past us).
+    const skipped = await waitFor(() => /skipping browser/.test(logText().slice(logBeforeHeal)), 15000);
+    check('C 自愈走了节流分支（watchdog.log 出现 skipping browser）', skipped,
+      'log tail=' + brief(logText().slice(logBeforeHeal), 6));
     check('C 自愈不重复弹窗：open 次数不变', opens().length === opensBeforeHeal,
       'before=' + opensBeforeHeal + ' after=' + opens().length + ' lines=' + JSON.stringify(opens().slice(-3)));
     check('C 自愈不重复弹窗：.web-auth-opened 内容不变',
@@ -416,13 +433,154 @@ function makeCtx(registered) {
     check('E2 默认路径同样输出 `Web auth URL: not captured yet`', /Web auth URL: not captured yet/.test(e2.out), brief(e2.out));
     console.log('     (E1 ' + (e1.ms / 1000).toFixed(1) + 's / E2 ' + (e2.ms / 1000).toFixed(1)
       + 's —— AUTH_WAIT 默认 20s，上限断言 ' + (AUTH_WAIT_MAX_MS / 1000) + 's)');
+
+    // ===== N7: `--start` (one-shot resume) =================================
+    // startWeb() unlinks the stopped flag, makes sure a watchdog runs, launches
+    // the web when it is not healthy, and must not exit before the token line is
+    // captured (same bug class as A). A REAL detached watchdog would race this
+    // CLI into a second launch, so stand in for it: startWeb() only checks that
+    // the recorded watchdog PID is alive.
+    const standInWatchdog = () => {
+      const c = spawn('/bin/sleep', ['120'], { stdio: 'ignore' });
+      fs.writeFileSync(daemonFile('.dsh-watchdog.pid'), String(c.pid));
+      return c;
+    };
+    await killAll();
+    fs.writeFileSync(daemonFile('.daemon-stopped'), new Date().toISOString());
+    let stand = standInWatchdog();
+    const opensBeforeStart = opens().length;
+    const s1 = await runCli(['--start'], {}, 40000);
+    const s1Tok = tokenInfo();
+    const s1Expect = s1Tok ? s1Tok.url : null;
+    check('N7a --start 从「web 已停 + .daemon-stopped」状态跑通', !s1.timedOut && s1.code === 0,
+      'code=' + s1.code + ' ms=' + s1.ms + ' err=' + brief(s1.err) + ' out=' + brief(s1.out));
+    check('N7a --start 拉起 web 并等到/落盘新 token（与 A 同型）',
+      !!s1Expect && currentAuthUrl() === s1Expect && pidFromFile('.dsh-web.pid') === s1Tok.pid,
+      'file=' + (currentAuthUrl() || '<absent>') + ' expect=' + s1Expect
+      + ' pid=' + pidFromFile('.dsh-web.pid') + ' out=' + brief(s1.out));
+    check('N7a stdout 含 `Web auth URL:`', /Web auth URL:/.test(s1.out), brief(s1.out));
+    check('N7a 清掉了 .daemon-stopped（监控恢复）', !fs.existsSync(daemonFile('.daemon-stopped')));
+    try { stand.kill('SIGKILL'); } catch (e) { /* gone */ }
+
+    // already-healthy early exit: nothing was launched, so there is no seed
+    // chain to wait for — the CLI must NOT burn AUTH_WAIT_MS (20s here).
+    // N7a's detached `open` must land before the next baseline is taken.
+    await waitFor(() => opens().length === opensBeforeStart + 1, 5000);
+    stand = standInWatchdog();
+    const opensBeforeEarlyExit = opens().length;
+    const startsBeforeStart = starts().length;
+    const s2 = await runCli(['--start'], { DSH_DAEMON_AUTH_WAIT: '20' }, 40000);
+    check('N7b 已健康时 --start 早退：≤5s 返回（不白等 AUTH_WAIT=20s）',
+      !s2.timedOut && s2.code === 0 && s2.ms <= 5000,
+      'ms=' + s2.ms + ' code=' + s2.code + ' out=' + brief(s2.out));
+    check('N7b 早退分支没有重启 web',
+      starts().length === startsBeforeStart && pidFromFile('.dsh-web.pid') === s1Tok.pid,
+      'starts=' + startsBeforeStart + '->' + starts().length + ' pid=' + pidFromFile('.dsh-web.pid') + ' was=' + s1Tok.pid);
+    check('N7b 早退分支不误弹窗', opens().length === opensBeforeEarlyExit,
+      'before=' + opensBeforeEarlyExit + ' after=' + opens().length);
+    check('N7b stdout 同时报告 healthy 与 auth URL 状态',
+      /web server already healthy/.test(s2.out) && /Web auth URL:/.test(s2.out), brief(s2.out));
+    try { stand.kill('SIGKILL'); } catch (e) { /* gone */ }
+
+    // N7c (--restart-pending): NO e2e on purpose. quietThenRestart() waits for
+    // the dsh activity endpoint to look idle for QUIET_WINDOW_MS (5 minutes) and
+    // only gives up after DEFER_MAX_MS (15 minutes) when it is unreachable —
+    // both are an order of magnitude outside this suite's budget, and faking the
+    // endpoint would still have to wait out the 5-minute quiet window. Covered
+    // as template wiring instead, like version-gate.test.js does.
+    const genSrc = fs.readFileSync(watchdogJs, 'utf8');
+    const qStart = genSrc.indexOf('async function quietThenRestart()');
+    const qTail = qStart >= 0 ? genSrc.slice(qStart) : '';
+    const qNext = qTail.indexOf('\nasync function ');
+    const qBody = qNext > 0 ? qTail.slice(0, qNext) : qTail;
+    check('N7c --restart-pending 的等待器在退出前 await 了 seed 结果（源码级断言）',
+      qStart >= 0 && /printWebSeedResult\(\)/.test(qBody), qStart < 0 ? 'quietThenRestart not found' : brief(qBody, 4));
+    const pendAt = genSrc.indexOf("'--restart-pending')");
+    check('N7c CLI 的 --restart-pending 分支接到 quietThenRestart',
+      pendAt >= 0 && genSrc.slice(pendAt, pendAt + 300).indexOf('quietThenRestart(') >= 0,
+      pendAt < 0 ? 'no --restart-pending branch' : brief(genSrc.slice(pendAt, pendAt + 300), 3));
+
+    // ===== F: adopting a dsh web the watchdog did NOT launch (BLOCKING B1)
+    // A manual `dsh web` prints its token to ITS terminal, never to dsh-web.log.
+    // When the watchdog adopts such a listener it writes WEB_PID; if it leaves
+    // the run anchor alone, currentRunAuthUrl() still scans from the PREVIOUS
+    // generation's base, finds the DEAD token, and then both status paths call
+    // it "valid while this web process runs" while ensureWebAuth() re-seeds it —
+    // popping a browser with a dead token.
+    await killAll();
+    const opensBeforeGen1 = opens().length;
+    const f0 = await runCli(['--restart'], {}, 40000);
+    const t1 = tokenInfo();
+    const t1Url = t1 ? t1.url : null;
+    // This generation's own popup must have landed before the baseline is set:
+    // F asserts the ADOPTION adds none on top of it.
+    await waitFor(() => opens().length === opensBeforeGen1 + 1, 5000);
+    const opensBeforeF = opens().length;
+    check('F 前置：gen1 由 watchdog 拉起并 seed 出 URL（.dsh-web.started + anchor 都在）',
+      !!t1Url && currentAuthUrl() === t1Url && !!readOffset(),
+      'file=' + currentAuthUrl() + ' token=' + JSON.stringify(t1) + ' out=' + brief(f0.out));
+    const logBeforeF = logText().length;
+    // Kill ONLY the managed web; the "manual" dsh web takes the port next.
+    try { process.kill(t1.pid, 'SIGKILL'); } catch (e) { /* gone */ }
+    await waitFor(() => !alive(t1.pid), 5000);
+    manualWeb = spawn(process.execPath, [fakeBin, 'web', '--port', String(PORT)], {
+      env: Object.assign({}, process.env, { FAKE_TOKEN_NEVER: '1' }),
+      stdio: 'ignore',
+      detached: true,
+    });
+    manualWeb.unref();
+    await waitFor(() => { const m = tokenInfo(); return !!(m && m.pid === manualWeb.pid); }, 10000);
+    const t2 = tokenInfo();
+    check('F 前置：手动起的 dsh web 已在听端口，且 token 没有进 dsh-web.log（模拟打到终端）',
+      !!(t2 && t2.pid === manualWeb.pid && webLogText().indexOf(t2.token) < 0),
+      'manual=' + JSON.stringify(t2) + ' weblogHasToken=' + (t2 ? webLogText().indexOf(t2.token) >= 0 : '?'));
+    // restart-loop T1 recipe: the pid file points at a process that is gone.
+    fs.writeFileSync(daemonFile('.dsh-web.pid'), '999999\n');
+    // Deliberately fresh browser state: if anything re-seeds the dead token it
+    // WILL open a tab (browserOpenedThisRun() must not mask the bug).
+    try { fs.unlinkSync(daemonFile('.web-auth-url')); } catch (e) { /* absent */ }
+    try { fs.unlinkSync(daemonFile('.web-auth-opened')); } catch (e) { /* absent */ }
+    // NOTE: .dsh-web.started from gen1 is kept on purpose. B1 is exactly the
+    // case where the (unchanged) started stamp still matches the stale anchor,
+    // so runLogBase() does NOT bail out — that is what makes the dead token
+    // look current.
+    residentWatchdog = spawn(process.execPath, [watchdogJs], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let fOut = '';
+    residentWatchdog.stdout.on('data', (d) => { fOut += d; });
+    residentWatchdog.stderr.on('data', (d) => { fOut += d; });
+    const adopted = await waitFor(
+      () => pidFromFile('.dsh-web.pid') === manualWeb.pid && /adopted the running dsh web/.test(logText()), 20000);
+    check('F watchdog 收养了手动起的 dsh web（pid 文件被纠正到真监听者）', adopted,
+      'pid file=' + pidFromFile('.dsh-web.pid') + ' manual=' + manualWeb.pid
+      + ' wd=' + brief(fOut) + ' log=' + brief(logText(), 4));
+    // Bounded settle window (6 x 1s ticks). The broken path re-seeds the dead
+    // token on its FIRST healthy tick, so counting ticks from adoption is enough
+    // to observe it; the fixed path finds no current-run line and never seeds.
+    await sleep(6000);
+    const fTail = logText().slice(logBeforeF);
+    check('F 没有拿上一代死 token 重新 seed',
+      !t1Url || fTail.indexOf('web auth token: ' + t1Url) < 0, brief(fTail, 6));
+    check('F 没有为死 token 弹窗', opens().length === opensBeforeF,
+      'before=' + opensBeforeF + ' after=' + opens().length + ' last=' + JSON.stringify(opens().slice(-1)));
+    check('F .web-auth-url 里不得出现上一代死 token',
+      !t1 || currentAuthUrl().indexOf(t1.token) < 0, '.web-auth-url=' + JSON.stringify(currentAuthUrl()));
+    const fStatus = await runCli(['--status'], {}, 40000);
+    check('F 模板 --status 不把死 token 报成 valid while this web process runs',
+      !/valid while this web process runs/.test(fStatus.out), brief(fStatus.out, 6));
+    check('F 模板 --status 判定本代 token 未捕获（not captured）',
+      /not captured/.test(fStatus.out), brief(fStatus.out, 6));
+    const fPlugin = String(await statusTool.execute({}, {}));
+    check('F 插件 doStatus 同样不报 valid', !/valid while this web process runs/.test(fPlugin), brief(fPlugin, 6));
+    check('F 插件 doStatus 判定本代 token 未捕获（not captured）', /not captured/.test(fPlugin), brief(fPlugin, 6));
   } catch (e) {
     failures += 1;
     console.log('  [FAIL] 测试异常: ' + (e && e.stack ? e.stack.split('\n').slice(0, 6).join(' | ') : e));
   } finally {
     if (residentWatchdog) { try { residentWatchdog.kill('SIGKILL'); } catch (e) { /* gone */ } }
+    if (manualWeb) { try { manualWeb.kill('SIGKILL'); } catch (e) { /* gone */ } }
     await killAll();
-    console.log(failures ? `\nFAILED (${failures})` : '\nweb-auth-refresh tests passed (A-E: token refresh, run anchor, self-heal, open throttle, bounded wait)');
+    console.log(failures ? `\nFAILED (${failures})`
+      : '\nweb-auth-refresh tests passed (A-E + N7 + F: token refresh, run anchor, self-heal, open throttle, bounded wait, --start, adoption anchor)');
     console.log('sandbox: ' + tmp);
     process.exit(failures ? 1 : 0);
   }

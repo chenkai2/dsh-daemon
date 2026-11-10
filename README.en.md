@@ -371,6 +371,22 @@ certainly that URL was dead.
   `⏳ not captured yet`. The tool previously had no auth line at all. The plugin's own
   `dsh_daemon_start` direct-launch path now writes the same `.dsh-web.logoffset` anchor.
 
+**Two transition states you will see right after upgrading (both are expected)**
+
+- An older watchdog script carries no anchor, so `.dsh-web.logoffset` only appears on the **next
+  launch**. Until then `status` honestly reports `stale` / `not captured yet` and `ensureWebAuth()`
+  deliberately does nothing (a missing anchor always means "cannot tell" — it never falls back to an
+  older generation's token). One `dsh-daemon restart` fills it in;
+- **Adopting someone else's process resets the anchor to an empty window**: the watchdog adopts a
+  `dsh web` it did not start itself (one started manually after the daemon's server died, or the
+  winner of a `launch()` race). It treats that instance as a **new generation** — resetting
+  `.dsh-web.logoffset` to an empty window and bumping `.dsh-web.started` — so `status` reports
+  `not captured yet`. That is deliberate: a manual `dsh web` prints its token to the **terminal**, not
+  into `dsh-web.log`, so the daemon cannot know it — saying "unknown" is correct, advertising the
+  previous generation's dead token as `valid while this web process runs` is not. This was the last
+  reachable path of the bug above: the first v0.1.30 implementation missed it, and code review
+  reproduced it in a sandbox before the release.
+
 **Regression test** `test/web-auth-refresh.test.js` (wired into both `npm test` and `test:ci`): a fake
 `dsh web` reproduces the upstream ordering exactly (`/health` immediately, token line 3 s later) and the
 **real generated watchdog** is exercised across A–E — `--restart` must wait for and persist the new
