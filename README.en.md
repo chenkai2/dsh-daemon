@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.30 | **0.1.x and 0.2.x** | Fixes "the Web auth URL in `status` never changes": `dsh web` prints its token line only **after the plugin loader settles**, while `/health` answers much earlier — so a one-shot CLI (`restart`/`start`/`restart-pending`) called `process.exit()` the moment the health probe returned and dropped `seedWebAuth()`'s polling timers (no `.web-auth-url` write, no log line, not even the 90 s timeout line), and the resident watchdog never re-seeded; the URL stayed pinned to a dead token yet was still labelled `valid while this web process runs`. Now: the seed chain is awaitable (bounded per CLI invocation via `DSH_DAEMON_AUTH_WAIT`, seconds, default 20, then it exits with a `not captured yet` note and the next healthy tick fills it in); a per-generation log anchor `.dsh-web.logoffset` keeps older tokens out of "current" (backwards chunked scan, ≤8 MB); the resident watchdog self-heals the URL on every healthy tick (once per generation, single-flight); the browser is throttled per **web generation** via `.web-auth-opened`; both `dsh-daemon status` and the `dsh_daemon_status` tool only claim `valid` for the running process and otherwise report `stale` / `not captured yet` (the tool had no such line at all) |
 | 0.1.29 | **0.1.x and 0.2.x** | dsh compatibility gate for auto-update: every release declares `dsh.requires.dsh`, and the updater compares it with the installed dsh version — **unsatisfied / undeclared / unreadable dsh version skips the automatic update** (a human can force it with `dsh-daemon update --apply`); the registry probe now retries twice with a 15 s budget and classifies failures (timeout / DNS / HTTP / connection), and `status` shows the last successful check |
 | 0.1.28 | **0.1.x and 0.2.x** | Fixes health-check false kills and the restart storm: per-probe `/health` budget 5 s → **20 s**, failure threshold 3 → **5** (~50 s of real misses before a restart); serialized ticks (`tickBusy`) plus a single-flight `launch()` so two dsh web processes can no longer be spawned in the same second (`EADDRINUSE`); **adopts** an unmanaged dsh web that already serves the port (corrects the pid file) instead of launching a second one; verifies that a PID really is a dsh web before signalling it (no more killing a recycled PID); `status` reports a pid-file/listener mismatch; refuses non-JS entries (`dsh.ps1`/`.cmd` shims) with a clear error |
 | 0.1.27 | **0.1.x and 0.2.x** | Health-check interval default 30 s → **10 s** (faster self-heal); adds `dsh-daemon logs` and `dsh_daemon_logs`: a failed dsh web start now prints a systemctl-style details pointer (web + watchdog log tails, `/health`, PID, launch age) |
@@ -322,6 +323,61 @@ node test/logs-command.test.js                  # 10s tick default + dsh-daemon 
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.30 — the `status` Web auth URL no longer stays pinned to a dead token
+
+`dsh web` prints `dsh web: http://…?token=…` only **after the plugin loader settles** (upstream
+`web-app` awaits `loader.await()` before `console.log`), while `/health` answers as soon as the
+listener is up. A one-shot CLI process (`dsh-daemon restart` / `start`) therefore called
+`process.exit()` as soon as `waitForHealth()` returned and dropped `seedWebAuth()`'s `setTimeout`
+poll chain: **no `.web-auth-url` write, no `web auth token:` log line, not even the "no token line
+within 90 s" timeout** — a completely silent failure.
+
+The resident watchdog is not the process that started that chain either, and had no catch-up path, so
+`~/.dsh/daemon/.web-auth-url` stayed frozen at the last token it had seeded itself — while `status`
+unconditionally printed `(valid while this web process runs)`, advertising a dead token as live.
+
+Field evidence (2026-11-10): the file held `kf__jb…` seeded by the **main loop** at `09:54Z`, while the
+running process (PID 57102, started `08:40Z`) had printed `hBYC0TQM…`. The four one-shot restarts in
+`watchdog.log` (`10:57Z`, `08:12Z`, `08:13Z`, `08:40Z`) show neither a success line nor a timeout line —
+exactly what `process.exit()` cutting the chain looks like. The more you ran manual `restart`, the more
+certainly that URL was dead.
+
+**Fix (four layers; any one missing leaves the bug in place)**
+
+- **The seed chain is awaitable**: `seedWebAuth()` resolves `{ url }`, `launch()` records
+  `lastWebSeed`, and the three one-shot modes await `awaitWebSeed(capMs)` before `process.exit()`.
+  The cap is **independent of the poll chain**: `DSH_DAEMON_AUTH_WAIT` (seconds, default 20, read at
+  runtime — not baked in at install), after which it prints
+  `Web auth URL: not captured yet — the watchdog fills it in on its next health tick` and exits
+  normally. That keeps the URL without hanging `restart` for the 5-minute startup grace;
+- **Per-generation log anchor** `.dsh-web.logoffset` (`{base,started}`, written **before** the spawn):
+  `currentRunAuthUrl()` only accepts the **last** token line inside `dsh-web.log[base..]`, so a
+  previous process's token can never be reported as current. win32 `Start-Process` truncates the log,
+  so `size < base` still falls back to the whole file. The scan walks **backwards** from EOF in 256 KB
+  chunks (≤8 MB), never pulling a multi-megabyte log into memory, and answers "unknown" (never a
+  guess) when the anchor is missing;
+- **The resident watchdog self-heals on every healthy tick** (`ensureWebAuth()`): URL missing, not
+  the current generation's, or mtime older than `.dsh-web.started` → re-seed. At most once per
+  generation, single-flight, fire-and-forget, so the tick never blocks and the chain cannot thrash
+  ("timeout unlink → immediate re-seed → timeout again");
+- **Browser open is throttled per web generation**: `.web-auth-opened` stores the `WEB_STARTED` value,
+  so a generation pops at most one tab. The old "skip if the URL equals the recorded one" check could
+  never fire across restarts (every launch mints a new token), i.e. it throttled nothing;
+- **`status` tells the truth**: `dsh-daemon status` (template) and the `dsh_daemon_status` tool share
+  one verdict — only a token line actually inside the current generation's log slice is labelled
+  `valid while this web process runs`; otherwise
+  `⚠️  stale — <url> (from a previous dsh web process; run dsh-daemon restart)` or
+  `⏳ not captured yet`. The tool previously had no auth line at all. The plugin's own
+  `dsh_daemon_start` direct-launch path now writes the same `.dsh-web.logoffset` anchor.
+
+**Regression test** `test/web-auth-refresh.test.js` (wired into both `npm test` and `test:ci`): a fake
+`dsh web` reproduces the upstream ordering exactly (`/health` immediately, token line 3 s later) and the
+**real generated watchdog** is exercised across A–E — `--restart` must wait for and persist the new
+token, `.web-auth-opened` must be written by the CLI seed path, the log anchor must sit at the current
+generation's start (including the `base > file size` truncation edge), the resident watchdog must
+self-heal without a second pop-up, and a missing token line must exit within `AUTH_WAIT` printing
+`not captured yet`. Before the fix, 17 assertions in that file were red on `main`.
 
 ### v0.1.29 — dsh compatibility gate for auto-update, diagnosable check failures
 
