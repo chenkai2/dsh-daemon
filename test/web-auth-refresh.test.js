@@ -250,8 +250,27 @@ function makeCtx(registered) {
     fs.mkdirSync(home, { recursive: true });
 
     const registered = [];
-    const plugin = require(path.join(root, 'lib', 'index.js'));
-    await plugin.apply(makeCtx(registered));
+    // Load the plugin the way the DSH cordis host loads it in dynamic-sandbox
+    // mode: evaluate lib/index.js with a `harness` global. The static-package
+    // path (`require('lib/index.js')`) would pull in @deepseek-ai/dsh-tools,
+    // which the committed package-lock.json pins to a machine-local
+    // `link: true` entry — `npm ci` succeeds in CI but leaves the link
+    // dangling, so `Cannot find module '@deepseek-ai/dsh-tools'` killed the
+    // publish workflow on the first v0.1.30 attempt. Anything wired into
+    // test:ci (the publish gate) must not depend on it — same loader as
+    // test/logs-command.test.js.
+    const src = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8');
+    const mockHarness = {
+      defineTool(def) {
+        if (!def || typeof def.execute !== 'function') throw new Error('bad tool def');
+        if (!def.output || typeof def.output.render !== 'function') throw new Error('bad output');
+        return def;
+      },
+      registerTool(ctx2, def) { registered.push(def); return () => {}; },
+    };
+    const pluginCtx = makeCtx(registered);
+    const plugin = new Function('ctx', 'harness', src)(pluginCtx, mockHarness);
+    await plugin.apply(pluginCtx);
     const install = registered.find((t) => t.name === 'dsh_daemon_install');
     const statusTool = registered.find((t) => t.name === 'dsh_daemon_status');
     check('注册了 dsh_daemon_install / dsh_daemon_status', !!install && !!statusTool);
