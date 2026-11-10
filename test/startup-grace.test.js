@@ -276,7 +276,14 @@ function makeCtx(registered) {
     await sleep(2000);
     const launches = starts().length;
     const stopped = stops().length;
-    check('F3 每次重启都有对应的优雅停止（端口先释放）', stopped >= 1 && launches > stopped,
+    // At most ONE launch may still be missing its stop: the assertion used to be
+    // `launches > stopped`, which failed whenever a second restart happened
+    // inside the window (launches=stops=2 — strictly MORE correct, yet red).
+    // That made F3 flaky under load (observed 2026-11-10 while another agent ran
+    // the suite concurrently). The invariant under test is "a relaunch only
+    // follows a graceful stop", i.e. no launch is left un-stopped except the
+    // newest one.
+    check('F3 每次重启都有对应的优雅停止（端口先释放）', stopped >= 1 && launches - stopped <= 1,
       'launches=' + launches + ' stops=' + stopped + ' events=' + JSON.stringify(events()));
   } finally {
     await killAll(0, 5000);

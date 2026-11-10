@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.30 | **0.1.x 与 0.2.x** | 修「`status` 里的 Web auth URL 永不刷新」：`dsh web` 的 token 行在插件 loader settle **之后**才打印，而 `/health` 早得多 —— 一次性 CLI（`restart`/`start`/`restart-pending`）在健康检查一过就 `process.exit()`，把 `seedWebAuth()` 的轮询定时器连根丢掉（不写 `.web-auth-url`、不打日志、连 90s 超时日志都没有），长驻 watchdog 又不补课，URL 就永久钉在上一代死 token 上，还标着 `valid while this web process runs`。现在：seed 链可 await（CLI 独立上限 `DSH_DAEMON_AUTH_WAIT`，默认 20s，到点正常退出并提示 not captured，由下一个健康 tick 补齐）；落盘本代日志锚点 `.dsh-web.logoffset`（旧代 token 永不当作 current，反向分块扫描 ≤8MB）；长驻 watchdog 每个健康 tick 自愈（每代一次、single-flight）；浏览器按**进程代**节流 `.web-auth-opened`；`dsh-daemon status` 与 `dsh_daemon_status` 两处只在 token 属于当前进程时才标 valid，否则明说 `stale` / `not captured yet`（工具侧此前根本没有这一行） |
 | 0.1.29 | **0.1.x 与 0.2.x** | 自动更新加 dsh 兼容门禁：每版在 `package.json` 声明 `dsh.requires.dsh`，更新前比对客户端已装 dsh 版本，**不满足/未声明/读不到就跳过自动升级**（`dsh-daemon update --apply` 可人工强制）；更新检查改为 2 次尝试 + 15s 预算，错误细分为 timeout / DNS / HTTP / 连接失败，status 显示上次成功检查时间 |
 | 0.1.28 | **0.1.x 与 0.2.x** | 修「健康检查误杀 + 重启风暴」：`/health` 单次预算 5s → **20s**、失败阈值 3 → **5**（~50s 真超时才重启）；tick 串行（`tickBusy`）+ `launch()` 单飞，杜绝同一秒拉起两个 dsh web（`EADDRINUSE`）；**收养**未托管但正在服务的 dsh web（纠正 pid 文件）而不是再拉一个；停进程前校验「这个 PID 真的是 dsh web」（PID 复用不误杀）；`status` 报出 pid 文件与实际监听者不一致；非 JS 入口（`dsh.ps1`/`.cmd` shim）拒绝启动并明确报错 |
 | 0.1.27 | **0.1.x 与 0.2.x** | 健康检查间隔默认 30s → **10s**（自愈更快）；新增 `dsh-daemon logs` 与 `dsh_daemon_logs`：dsh web 启动失败时像 systemctl 一样打印明细入口（web + watchdog 日志尾部、`/health`、PID、启动时长） |
@@ -259,6 +260,64 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.30 — `status` 的 Web auth URL 不再永久钉在死 token 上
+
+`dsh web` 打印 `dsh web: http://…?token=…` 的时机，是**插件 loader 全部 settle 之后**（上游
+`web-app` 明确 `await loader.await()` 再 `console.log`），而 `/health` 在 listener 一起来就应答。
+于是 `dsh-daemon restart` / `start` 这类**一次性 CLI 进程**在 `waitForHealth()` 一返回就
+`process.exit()`，把 `seedWebAuth()` 的 `setTimeout` 轮询链连根丢掉：**不写 `.web-auth-url`、不打
+`web auth token:` 日志、连「90s 没等到 token 行」的超时日志都没有**，完全是静默失败。
+
+长驻 watchdog 又不是这条链的发起者，也没有任何补课逻辑 ⇒ `~/.dsh/daemon/.web-auth-url` 永久停在
+它自己上一次 seed 的 token 上；而 `status` 无条件打印 `(valid while this web process runs)`，
+把死 token 当活的展示。
+
+现场（2026-11-10）：文件里是 `2026-11-09T09:54Z` 那次由**主循环** seed 的 `kf__jb…`，而当前进程
+（PID 57102，`08:40Z` 启动）实际打印的是 `hBYC0TQM…`。`watchdog.log` 里 4 次一次性重启
+（11-09 10:57Z、11-10 08:12Z/08:13Z/08:40Z）既无成功日志也无超时日志 —— 正因为退出前被
+`process.exit` 打断。手动 `restart` 越多，这个 URL 越必然是一根死 token。
+
+**修复（四层，缺一层都不算修好）**
+
+- **seed 链变成可 await**：`seedWebAuth()` 返回 `{ url }` promise，`launch()` 记下 `lastWebSeed`；
+  `restart` / `start` / `restart-pending` 三类一次性模式在 `process.exit()` 之前
+  `await awaitWebSeed(capMs)`。上限**独立于**轮询链：`DSH_DAEMON_AUTH_WAIT`（**秒**，默认 20，
+  运行时读取，不是 install 时烘焙），到点打印
+  `Web auth URL: not captured yet — the watchdog fills it in on its next health tick` 并正常退出 ——
+  既不会丢 URL，也不会像裸等那样挂到 5 分钟启动宽限；
+- **本代日志锚点** `.dsh-web.logoffset`（`{base,started}`，spawn **前**写）：`currentRunAuthUrl()`
+  只认 `dsh-web.log[base..]` 段里**最后一条** token 行，上一代进程的 token 永不当作 current；
+  win32 `Start-Process` 覆盖式写日志仍按 `size < base` 回退读整文件；扫描从 EOF **反向分块**
+  （256KB 一块，上限 8MB），不把几十 MB 日志读进内存；锚点缺失时一律回答「不知道」，绝不猜；
+- **长驻 watchdog 每个健康 tick 自愈** `ensureWebAuth()`：URL 缺失、与当前代不符、或 mtime 早于
+  `.dsh-web.started` → 重新 seed。每代最多一次 + single-flight + fire-and-forget，不阻塞 tick，
+  也不会「超时 unlink → 立刻重 seed → 再超时」抖圈；
+- **浏览器按「进程代」节流**：`.web-auth-opened` 存 `WEB_STARTED` 值，同一代最多弹一次。
+  原来的「URL 与上次记录相同就不弹」跨重启恒不成立（每次启动必换 token），等于没有节流；
+- **status 说真话**：`dsh-daemon status`（模板）与 `dsh_daemon_status`（工具）用**同一套判定** ——
+  只有 token 行确实落在当前代的日志段里才标 `valid while this web process runs`，否则
+  `⚠️  stale — <url> (from a previous dsh web process; run dsh-daemon restart)` 或
+  `⏳ not captured yet`。工具侧此前**完全没有**这一行，这次一并补上。
+  另外插件自己的 `dsh_daemon_start` 直启路径也会写同一份 `.dsh-web.logoffset` 锚点。
+
+**升级/交接时的两个过渡态（都属正常，看到别以为又坏了）**
+
+- 升级到 0.1.30 时老 watchdog 脚本不带锚点，`.dsh-web.logoffset` 要等**下一次 launch** 才写出来。
+  这期间 `status` 会如实说 `stale` / `not captured yet`，`ensureWebAuth()` 也刻意**不动手**
+  （锚点缺失时一律回答「不知道」，绝不拿旧代 token 充数）。跑一次 `dsh-daemon restart` 即可补齐；
+- **收养别人的进程时锚点归零**：watchdog 会收养不是自己拉起的 `dsh web`（守护进程崩了之后手动起的、
+  或 `launch()` 竞态下的 winner）。此时它把这个实例当作**新的一代**，把 `.dsh-web.logoffset` 重置成
+  空窗口并更新 `.dsh-web.started`，于是 `status` 报 `not captured yet`。这是刻意的：手动 `dsh web`
+  的 token 打在**终端**里、根本不进 `dsh-web.log`，daemon 拿不到 —— 宁可说「不知道」，也不能把
+  上一代的死 token 标成 `valid while this web process runs`。这一条正是上面那个 bug 的**最后一条
+  可达路径**（v0.1.30 首次实现漏掉了它，CR 阶段被 reviewer 用沙箱复现后补上）。
+
+**回归测试** `test/web-auth-refresh.test.js`（已进 `npm test` 与 `test:ci`）：假 `dsh web` 精确复刻
+上游时序（`/health` 立刻 200、token 行延迟 3s）后用**真实生成的 watchdog** 跑 A–E 五组用例 ——
+`--restart` 必须等到并落盘新 token、`.web-auth-opened` 必须由 CLI 的 seed 路径写出、
+日志锚点必须锚在本代起点（含 `base > 文件大小` 的截断边界）、常驻 watchdog 必须自愈且不重复弹窗、
+无 token 行时必须在 `AUTH_WAIT` 内退出并打印 `not captured yet`。修复前该文件在 main 上 17 条红。
 
 ### v0.1.29 — 自动更新加 dsh 兼容门禁，更新失败可诊断
 
