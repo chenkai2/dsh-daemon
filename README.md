@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.31 | **0.1.x 与 0.2.x** | 修「`/health` 404 ⇒ 无限重启 + 每次重启弹一个浏览器页签」：`/health` 是**本插件自己注册**的路由，目标 profile 里插件没激活（装错 profile／插件加载失败／该 profile 的 `cordis.yml` 没这条）时它恒 404，watchdog 于是每约 5 分钟重启一次、每次都是新的一代、按代节流又允许开一次浏览器 ⇒ 桌面隔一阵子冒一个页签。现在用**核心静态资源**做正向存活判据：`GET /manifest.webmanifest` 200（或 `/` 返回 200/301/302/401/403，即核心 auth fence 在应答）就说明 dsh 本体活着。`/health` 404 **且**核心活着 ⇒ 插件没在服务，重启装不回插件 ⇒ **停止重启**，写 `.daemon-pluginless`，日志与 `status`/`dsh_daemon_status` 都给出可操作原因（`dsh_daemon_reinstall`）；核心也死了（连不上/超时/全 404）⇒ 才按原策略重启 |
 | 0.1.30 | **0.1.x 与 0.2.x** | 修「`status` 里的 Web auth URL 永不刷新」：`dsh web` 的 token 行在插件 loader settle **之后**才打印，而 `/health` 早得多 —— 一次性 CLI（`restart`/`start`/`restart-pending`）在健康检查一过就 `process.exit()`，把 `seedWebAuth()` 的轮询定时器连根丢掉（不写 `.web-auth-url`、不打日志、连 90s 超时日志都没有），长驻 watchdog 又不补课，URL 就永久钉在上一代死 token 上，还标着 `valid while this web process runs`。现在：seed 链可 await（CLI 独立上限 `DSH_DAEMON_AUTH_WAIT`，默认 20s，到点正常退出并提示 not captured，由下一个健康 tick 补齐）；落盘本代日志锚点 `.dsh-web.logoffset`（旧代 token 永不当作 current，反向分块扫描 ≤8MB）；长驻 watchdog 每个健康 tick 自愈（每代一次、single-flight）；浏览器按**进程代**节流 `.web-auth-opened`；`dsh-daemon status` 与 `dsh_daemon_status` 两处只在 token 属于当前进程时才标 valid，否则明说 `stale` / `not captured yet`（工具侧此前根本没有这一行） |
 | 0.1.29 | **0.1.x 与 0.2.x** | 自动更新加 dsh 兼容门禁：每版在 `package.json` 声明 `dsh.requires.dsh`，更新前比对客户端已装 dsh 版本，**不满足/未声明/读不到就跳过自动升级**（`dsh-daemon update --apply` 可人工强制）；更新检查改为 2 次尝试 + 15s 预算，错误细分为 timeout / DNS / HTTP / 连接失败，status 显示上次成功检查时间 |
 | 0.1.28 | **0.1.x 与 0.2.x** | 修「健康检查误杀 + 重启风暴」：`/health` 单次预算 5s → **20s**、失败阈值 3 → **5**（~50s 真超时才重启）；tick 串行（`tickBusy`）+ `launch()` 单飞，杜绝同一秒拉起两个 dsh web（`EADDRINUSE`）；**收养**未托管但正在服务的 dsh web（纠正 pid 文件）而不是再拉一个；停进程前校验「这个 PID 真的是 dsh web」（PID 复用不误杀）；`status` 报出 pid 文件与实际监听者不一致；非 JS 入口（`dsh.ps1`/`.cmd` shim）拒绝启动并明确报错 |
@@ -260,6 +261,56 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.31 — `/health` 404 不再触发无限重启（也就不会每次重启弹一个页签）
+
+**现场**：在一个**全新空 `DSH_HOME`** 的沙箱里跑 `dsh_daemon_install`，桌面每隔约 5 分钟冒出一个
+`http://127.0.0.1:3099/?token=…` 页签，直到人工杀进程才停。
+
+**根因**：`/health` **不是 dsh 自带的**，是本插件在 `apply()` 里 `ctx.webServer.register('/health')` 注册的。
+目标 profile 里插件没激活时，这个路由根本不存在 ⇒ `/health` 恒 **404** ⇒ `healthy()` 恒 false ⇒
+watchdog 按「web 挂了」的剧本走：5 分钟启动宽限到期 → 累计 5 次失败 → 优雅停止并重启 → **新的一代** →
+新 token → 按代节流允许再开一次浏览器。周期 ≈ 5min 宽限 + 5×10s ≈ 5m50s，正好是「隔一阵子」。
+在真实世界里，任何 profile 里插件没激活（装错 profile、插件加载失败、`cordis.yml` 缺这一条）的机器都会中招，
+而用户在 `status` 里只看到 `still starting` / `unhealthy`，完全看不出真因 —— 重启只会让它更糟。
+
+**判据换成核心的正向证据**（关键：`/health` 是我们自己的，不能用它证明 dsh 还活着）。本机无 cookie 实测：
+
+| 路径 | 状态码 | 说明 |
+|---|---|---|
+| `/health` | 200 `application/json` | 本插件注册，插件不在就 404 |
+| `/manifest.webmanifest` | 200 `application/manifest+json` | **核心** `frontend-static` 的 fallback 提供，免 cookie |
+| `/` | 401 `text/plain` | 核心 auth fence 应答 ⇒ 也证明 dsh 活着 |
+| `/favicon.ico`、`/nope` | 404 | 缺文件即 404，不能当判据 |
+
+于是 tick 的分类变成：
+
+- `/health` 404 **且** `coreProbe()` 活着（manifest 200，或 `/` ∈ {200,301,302,401,403}）⇒
+  **插件没在服务，重启装不回插件** ⇒ 不重启、写 `~/.dsh/daemon/.daemon-pluginless`、打一条日志、`return`；
+- `coreProbe()` 也死了（连接被拒/超时/5xx/全 404）⇒ dsh 真的没在服务 ⇒ **原策略照旧**（阈值/FailThreshold 一律不变）；
+- `/health` 5xx 或超时但核心活着 ⇒ 原策略照旧。
+
+不重启也就不会有新的一代，**顺带就消掉了弹页签**——这条路径上「不许重启」和「不许弹窗」是同一件事。
+原方案里那个「允许一次重启以排除瞬时激活失败」的计数器被**删掉**了：有正向证据一次即可判定，
+而且纯 404 流下它其实永远不会真的触发（两个 tick 就进放弃分支，阈值到不了），留着只会让日志撒谎。
+
+**`status` 说真话**（模板 `printStatus()` 与插件 `doStatus()` 共用同一个 `pluginlessStatusLine()`，
+文案物理上只有一份，经 `toString()` 注入生成的脚本）：
+
+```
+   Web server: ⚠️  alive but /health is 404 on 127.0.0.1:3080 (PID 12345) — the dsh-daemon
+   plugin is not active in the profile this daemon launches, so restarting cannot fix it;
+   fix: dsh_daemon_reinstall (details: dsh-daemon logs)
+```
+
+**这是刻意的 fail-safe**：dsh web 本身还在正常服务（只是缺了我们的探活路由），所以停掉自动重启并不会让用户
+失去服务；修好 profile（重新 `dsh_daemon_reinstall` 到正确的 profile）后再 `dsh-daemon restart` 即恢复。
+`/health` 重新变 200 时状态文件会被自动清掉，判定不会永久锁死。卸载时该文件一并删除。
+
+**回归测试** `test/pluginless-health.test.js`：假 web 分别提供
+`manifest 200 + /health 404`（插件缺席 ⇒ 只启动 1 次、写状态文件、两处判词行一致、弹窗 ≤1）、
+`manifest 200 + /health 503`（真故障 ⇒ 照旧重启 ≥2 次）、
+`manifest 404 + / 404 + /health 404`（**端口被非 dsh 进程占着 ⇒ 必须仍然重启 ≥2 次**，防「判据太宽卡死不重启」）。
 
 ### v0.1.30 — `status` 的 Web auth URL 不再永久钉在死 token 上
 
