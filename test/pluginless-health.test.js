@@ -132,7 +132,8 @@ const VERDICT_ALIVE_404 = 'alive but /health is 404';
 // the 404 line only.
 const GIVE_UP_LINE_MATCH = (text) => String(text || '').split('\n')
   .some((l) => l.indexOf('/health is 404') >= 0 && l.indexOf('not restarting') >= 0);
-// dsh 0.2.2-rc.3 fences every registered route with auth 'required' by default,
+// dsh builds with WebAuthPolicy (master after the 0.2.2-rc.3 tag) fence every
+// registered route with auth 'required' by default,
 // which turns our cookie-less /health probe into a 401. Restarting cannot change
 // an auth policy either, so a 401 must reach the same "stop and explain" verdict
 // as a 404 — this matcher is the anchor for that case (M).

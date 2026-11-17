@@ -1,5 +1,6 @@
 'use strict';
-// dsh 0.2.2-rc.3 turned every registered web route into an auth-gated route.
+// dsh builds carrying WebAuthPolicy (master after the 0.2.2-rc.3 tag — the tag
+// itself predates it) turned every registered web route into an auth-gated route.
 //
 // The web server's policy accessor is
 //     authPolicy(auth, request) { return typeof auth === 'function' ? auth(request) : auth ?? 'required'; }
@@ -45,8 +46,14 @@ while ((m = re.exec(src)) !== null) {
   const pathMatch = body.match(/path:\s*'([^']+)'/);
   routes.push({ path: pathMatch ? pathMatch[1] : '<unknown>', body });
 }
-check('found the plugin\'s web routes (ws.register({...}))', routes.length >= 2,
-  'routes=' + JSON.stringify(routes.map((r) => r.path)));
+// Anchor the count to the number of registration sites, not a >=2 floor: a route
+// written as `ws.register(routeObj)` or closed with `});` would otherwise slip
+// past the per-route `auth` requirement below without any test going red.
+const registerSites = (src.match(/ws\.register\(/g) || []).length;
+check('every ws.register(...) site was parsed as a route',
+  routes.length === registerSites,
+  'parsed=' + routes.length + ' sites=' + registerSites
+  + ' routes=' + JSON.stringify(routes.map((r) => r.path)));
 
 for (const route of routes) {
   check('route ' + route.path + ' declares auth explicitly',
@@ -67,9 +74,16 @@ check('the /dsh-daemon/activity route exists', !!activityRoute);
 check('/dsh-daemon/activity is anonymous (the idle-window probe sends no cookie)',
   !!activityRoute && /auth:\s*'anonymous'/.test(activityRoute.body));
 
+// ---- the command route keeps its CSRF guard ------------------------------
+// `auth: 'anonymous'` is required for the CLI's cookie-less curl, so the guard is
+// the only thing between a drive-by cross-origin POST and install/uninstall.
+const commandRoute = routes.find((r) => r.path === '/dsh-daemon/command');
+check('the /dsh-daemon/command route rejects Origin-bearing requests (CSRF guard)',
+  !!commandRoute && /req\.headers\.origin/.test(commandRoute.body) && /writeHead\(403/.test(commandRoute.body));
+
 // ---- the reason is documented, so a later cleanup does not undo it --------
-check('source documents why auth is required (0.2.2-rc.3 / authPolicy)',
-  /0\.2\.2-rc\.3/.test(src) && /authPolicy/.test(src),
+check('source documents why auth is required (WebAuthPolicy / authPolicy)',
+  /WebAuthPolicy/.test(src) && /authPolicy/.test(src),
   'the comment is the only thing stopping a future "cleanup" from dropping the option');
 
 console.log('');
