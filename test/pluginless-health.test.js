@@ -74,7 +74,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Debug/verification knob: `PLUGINLESS_CASES=I node test/pluginless-health.test.js`
 // runs a subset (used to prove case I discriminates a too-wide liveness probe,
 // and to verify K/L against a candidate fix on their own).
-const CASES = String(process.env.PLUGINLESS_CASES || 'G,H,I,J,K,L')
+const CASES = String(process.env.PLUGINLESS_CASES || 'G,H,I,J,K,L,M')
   .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
 const want = (name) => CASES.indexOf(name) >= 0;
 
@@ -132,6 +132,12 @@ const VERDICT_ALIVE_404 = 'alive but /health is 404';
 // the 404 line only.
 const GIVE_UP_LINE_MATCH = (text) => String(text || '').split('\n')
   .some((l) => l.indexOf('/health is 404') >= 0 && l.indexOf('not restarting') >= 0);
+// dsh 0.2.2-rc.3 fences every registered route with auth 'required' by default,
+// which turns our cookie-less /health probe into a 401. Restarting cannot change
+// an auth policy either, so a 401 must reach the same "stop and explain" verdict
+// as a 404 — this matcher is the anchor for that case (M).
+const GIVE_UP_LINE_MATCH_401 = (text) => String(text || '').split('\n')
+  .some((l) => l.indexOf('/health is 401') >= 0 && l.indexOf('not restarting') >= 0);
 // The PID a status verdict names, or 0 when it names none.
 function verdictPidFrom(text) {
   const line = verdictLines(text)[0] || '';
@@ -603,6 +609,48 @@ async function establishPluginless() {
         'verdicts=' + JSON.stringify(jVerdicts));
     }
 
+    // ===== M: dsh alive but /health is 401 (auth-fenced route) =============
+    // The exact shape of the 2026-11-17 incident: dsh 0.2.2-rc.3 defaults a
+    // registered route's WebAuthPolicy to 'required', so the cookie-less probe
+    // gets 401 instead of 200. Restarting cannot fix a fence — and each restart
+    // mints a new generation, hence another browser tab — so it must stop and
+    // explain, exactly like the 404 case.
+    if (want('M')) {
+      const m = await runWindow('M', { FAKE_MANIFEST: '200', FAKE_ROOT: '401', FAKE_HEALTH: '401', FAKE_OTHER: '200' },
+        (b) => GIVE_UP_LINE_MATCH_401(logText().slice(b.log)));
+      check('M precondition: /manifest.webmanifest=200, /=401, /health=401',
+        m.up && m.probed['/manifest.webmanifest'] === 200 && m.probed['/'] === 401 && m.probed['/health'] === 401,
+        'listening=' + m.up + ' probed=' + JSON.stringify(m.probed));
+
+      check('M1 a 401 does not restart: start events === 1',
+        m.anchored && m.starts === 1,
+        'anchored=' + m.anchored + ' starts=' + m.starts + ' events=' + JSON.stringify(webEvents().slice(-5)));
+
+      const giveUpLine = m.delta.split('\n').find((l) => l.indexOf('/health is 401') >= 0) || '';
+      check('M2 the line says `/health is 401` + `dsh web is alive` + the fence hint + `not restarting`',
+        giveUpLine.indexOf('dsh web is alive') >= 0
+        && giveUpLine.indexOf('auth fence') >= 0
+        && giveUpLine.indexOf('not restarting') >= 0
+        && giveUpLine.indexOf('dsh_daemon_reinstall') >= 0,
+        giveUpLine ? brief(giveUpLine, 1) : 'no `/health is 401` line; tail=' + brief(m.delta, 6));
+
+      check('M3 the record keeps the actual code (401), not a hardcoded 404',
+        !!m.state && m.state.code === 401,
+        'raw=' + (m.stateExists ? JSON.stringify(readDaemon('.daemon-pluginless')) : '<absent>'));
+
+      check('M4 after the give-up line no further dsh web was started',
+        m.anchored && starts().length === m.startsAtAnchor,
+        'startsAtAnchor=' + m.startsAtAnchor + ' now=' + starts().length);
+
+      const mCli = verdictLines((await runCli(['--status'], 60000)).out);
+      const mPlug = verdictLines(String(await statusTool.execute({}, {})));
+      check('M5 both status verdicts say `alive but /health is 401`',
+        mCli.length === 1 && mPlug.length === 1
+        && mCli[0].indexOf('alive but /health is 401') >= 0
+        && mPlug[0].indexOf('alive but /health is 401') >= 0,
+        'cli=' + JSON.stringify(mCli) + ' plugin=' + JSON.stringify(mPlug));
+    }
+
     // ===== K: the give-up verdict must describe the RUNNING dsh web =========
     // The give-up state is a fact about the PLUGIN being absent, not about one
     // process. Pinning the PID that happened to be there when the watchdog gave
@@ -737,7 +785,7 @@ async function establishPluginless() {
     }
     console.log(failures ? '\nFAILED (' + failures + ')'
       : '\npluginless-health tests passed (' + CASES.join('/')
-        + ': 404-pluginless stops and explains itself; 503 and a non-dsh listener still restart)');
+        + ': 404/401 stop and explain themselves; 503 and a non-dsh listener still restart)');
     console.log('sandbox: ' + tmp + (fs.existsSync(tmp) ? ' (kept)' : ' (removed)'));
     process.exit(failures ? 1 : 0);
   }

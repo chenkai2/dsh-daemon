@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.32 | **0.1.x and 0.2.x** | Fixes "since dsh 0.2.2-rc.3 `/health` answers 401 ⇒ the daemon thinks the web is never healthy ⇒ restart storm": the new web server defaults **every registered route** to `WebAuthPolicy 'required'` (`authPolicy(): auth ?? "required"`), and all three routes this plugin owns (`/health`, `/dsh-daemon/activity`, `/dsh-daemon/command`) are called by **cookie-less** clients — so all of them became 401: the health probe could never succeed, and the CLI's `install/reinstall/uninstall` got a non-JSON body. They now declare `auth: 'anonymous'` (the same opt-out core `authentication-token` / `hmr` / `modules` use); the command route additionally rejects any request carrying an `Origin` header as a CSRF guard (the CLI's curl sends none) |
 | 0.1.31 | **0.1.x and 0.2.x** | Fixes "`/health` 404 ⇒ endless restarts, and one browser tab per restart": `/health` is a route **this plugin registers itself**, so when the plugin is not active in the profile the daemon launches (wrong profile / failed activation / missing entry in that profile's `cordis.yml`) it is always 404 — and the watchdog then restarts roughly every 5 minutes, each restart being a new generation, which the per-generation throttle lets open one browser tab again. Liveness is now decided by a **core** static asset: `GET /manifest.webmanifest` returns 200 (or `/` returns 200/301/302/401/403, i.e. the core auth fence answers) ⇒ dsh itself is alive. `/health` 404 **and** core alive ⇒ the plugin is not serving and a restart cannot load it ⇒ **stop restarting**, record `.daemon-pluginless`, and make both `status` and the `dsh_daemon_status` tool state the actionable cause (`dsh_daemon_reinstall`); core dead too (refused/timeout/all-404) ⇒ the original restart policy applies |
 | 0.1.30 | **0.1.x and 0.2.x** | Fixes "the Web auth URL in `status` never changes": `dsh web` prints its token line only **after the plugin loader settles**, while `/health` answers much earlier — so a one-shot CLI (`restart`/`start`/`restart-pending`) called `process.exit()` the moment the health probe returned and dropped `seedWebAuth()`'s polling timers (no `.web-auth-url` write, no log line, not even the 90 s timeout line), and the resident watchdog never re-seeded; the URL stayed pinned to a dead token yet was still labelled `valid while this web process runs`. Now: the seed chain is awaitable (bounded per CLI invocation via `DSH_DAEMON_AUTH_WAIT`, seconds, default 20, then it exits with a `not captured yet` note and the next healthy tick fills it in); a per-generation log anchor `.dsh-web.logoffset` keeps older tokens out of "current" (backwards chunked scan, ≤8 MB); the resident watchdog self-heals the URL on every healthy tick (once per generation, single-flight); the browser is throttled per **web generation** via `.web-auth-opened`; both `dsh-daemon status` and the `dsh_daemon_status` tool only claim `valid` for the running process and otherwise report `stale` / `not captured yet` (the tool had no such line at all) |
 | 0.1.29 | **0.1.x and 0.2.x** | dsh compatibility gate for auto-update: every release declares `dsh.requires.dsh`, and the updater compares it with the installed dsh version — **unsatisfied / undeclared / unreadable dsh version skips the automatic update** (a human can force it with `dsh-daemon update --apply`); the registry probe now retries twice with a 15 s budget and classifies failures (timeout / DNS / HTTP / connection), and `status` shows the last successful check |
@@ -324,6 +325,49 @@ node test/logs-command.test.js                  # 10s tick default + dsh-daemon 
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.32 — dsh 0.2.2-rc.3's auth fence turned `/health` into a 401 (the daemon thought the web was never healthy)
+
+**What happened**: after upgrading dsh to 0.2.2-rc.3, `curl http://127.0.0.1:3080/health` answered **401**
+instead of 200. The consequences chain: the watchdog's health probe never sees 200 ⇒ treats the web as
+permanently unhealthy ⇒ restarts after 5 misses ⇒ a new generation ⇒ a new token ⇒ another browser tab
+(the very loop v0.1.31 had just closed, with the trigger code changed from 404 to 401). At the same time
+`dsh-daemon install/reinstall/uninstall` broke: the CLI `curl`-POSTs `/dsh-daemon/command`, and a 401 body
+is not JSON, so `JSON.parse` failed outright.
+
+**Root cause**: the new web server changed the default auth policy of registered routes to `required`:
+
+```js
+// packages/host/webserver/lib/index.js
+authPolicy(auth, request) { return typeof auth === 'function' ? auth(request) : auth ?? "required"; }
+// export type WebAuthPolicy = 'anonymous' | 'required' | 'deny';
+```
+
+All three routes this plugin registers are consumed by **cookie-less** callers:
+
+| Route | Caller | Why no cookie |
+|---|---|---|
+| `GET /health` | the watchdog health probe | `fetch()` carries no browser cookie |
+| `GET /dsh-daemon/activity` | the watchdog's idle-window probe | same |
+| `POST /dsh-daemon/command` | `dsh-daemon install/reinstall/uninstall` | the CLI uses `curl` |
+
+All three therefore have to step out of the fence, via an explicit `auth: 'anonymous'` — the same
+mechanism core `authentication-token` (`CONNECT_PATH`), `client/hmr` and `client/modules` use.
+
+The command route also gains a **CSRF guard**: a browser cross-origin POST to `127.0.0.1` always carries
+an `Origin` header while the CLI's `curl` does not — any request with `Origin` is rejected with 403. So a
+drive-by POST from some other web page can no longer trigger `install/uninstall`. (Before rc.3 this route
+was anonymous anyway, so this restores the old behaviour *and* closes the hole.)
+
+**Regression test** `test/health-route-auth.test.js` (instant, source-level, wired into `test` and `test:ci`):
+it scans every `ws.register({...})` in `lib/index.js` and requires **each route to declare `auth`
+explicitly**, pins `/health` (200 JSON + anonymous) and `/dsh-daemon/activity` (anonymous), and asserts the
+source keeps the 0.2.2-rc.3 / authPolicy explanation — so a later "cleanup" cannot silently drop the option.
+
+> One operational trap worth recording: the `dsh-daemon` CLI shim is written into **the current node's bin
+> directory** (`~/.nvm/versions/node/<ver>/bin/dsh-daemon` under nvm), so **upgrading or switching node makes
+> the command disappear** (the watchdog itself and, after the next install/reinstall, the plist still point at
+> the new node). Run `dsh_daemon_reinstall` once after switching node to recreate the CLI and the registration.
 
 ### v0.1.31 — `/health` 404 no longer means endless restarts (and one browser tab per restart)
 

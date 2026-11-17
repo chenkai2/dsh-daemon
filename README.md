@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.32 | **0.1.x 与 0.2.x** | 修「dsh 0.2.2-rc.3 起 `/health` 变 401 ⇒ daemon 认为 web 永远不健康 ⇒ 重启风暴」：新版 web server 把**所有注册路由**的默认 `WebAuthPolicy` 改成 `required`（`authPolicy(): auth ?? "required"`），而本插件的三条路由（`/health`、`/dsh-daemon/activity`、`/dsh-daemon/command`）都是给**不带 cookie** 的 watchdog / CLI 用的，于是全部 401 —— 健康探测永远失败、CLI 的 `install/reinstall/uninstall` 解析不到响应。现在三条路由显式声明 `auth: 'anonymous'`（与核心 `authentication-token` / `hmr` / `modules` 同一机制）；命令路由额外加了 CSRF 守卫（带 `Origin` 头的请求一律 403，CLI 的 curl 不带该头） |
 | 0.1.31 | **0.1.x 与 0.2.x** | 修「`/health` 404 ⇒ 无限重启 + 每次重启弹一个浏览器页签」：`/health` 是**本插件自己注册**的路由，目标 profile 里插件没激活（装错 profile／插件加载失败／该 profile 的 `cordis.yml` 没这条）时它恒 404，watchdog 于是每约 5 分钟重启一次、每次都是新的一代、按代节流又允许开一次浏览器 ⇒ 桌面隔一阵子冒一个页签。现在用**核心静态资源**做正向存活判据：`GET /manifest.webmanifest` 200（或 `/` 返回 200/301/302/401/403，即核心 auth fence 在应答）就说明 dsh 本体活着。`/health` 404 **且**核心活着 ⇒ 插件没在服务，重启装不回插件 ⇒ **停止重启**，写 `.daemon-pluginless`，日志与 `status`/`dsh_daemon_status` 都给出可操作原因（`dsh_daemon_reinstall`）；核心也死了（连不上/超时/全 404）⇒ 才按原策略重启 |
 | 0.1.30 | **0.1.x 与 0.2.x** | 修「`status` 里的 Web auth URL 永不刷新」：`dsh web` 的 token 行在插件 loader settle **之后**才打印，而 `/health` 早得多 —— 一次性 CLI（`restart`/`start`/`restart-pending`）在健康检查一过就 `process.exit()`，把 `seedWebAuth()` 的轮询定时器连根丢掉（不写 `.web-auth-url`、不打日志、连 90s 超时日志都没有），长驻 watchdog 又不补课，URL 就永久钉在上一代死 token 上，还标着 `valid while this web process runs`。现在：seed 链可 await（CLI 独立上限 `DSH_DAEMON_AUTH_WAIT`，默认 20s，到点正常退出并提示 not captured，由下一个健康 tick 补齐）；落盘本代日志锚点 `.dsh-web.logoffset`（旧代 token 永不当作 current，反向分块扫描 ≤8MB）；长驻 watchdog 每个健康 tick 自愈（每代一次、single-flight）；浏览器按**进程代**节流 `.web-auth-opened`；`dsh-daemon status` 与 `dsh_daemon_status` 两处只在 token 属于当前进程时才标 valid，否则明说 `stale` / `not captured yet`（工具侧此前根本没有这一行） |
 | 0.1.29 | **0.1.x 与 0.2.x** | 自动更新加 dsh 兼容门禁：每版在 `package.json` 声明 `dsh.requires.dsh`，更新前比对客户端已装 dsh 版本，**不满足/未声明/读不到就跳过自动升级**（`dsh-daemon update --apply` 可人工强制）；更新检查改为 2 次尝试 + 15s 预算，错误细分为 timeout / DNS / HTTP / 连接失败，status 显示上次成功检查时间 |
@@ -261,6 +262,47 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.32 — dsh 0.2.2-rc.3 的 auth 围栏把 `/health` 变成 401（daemon 认为 web 永远不健康）
+
+**现场**：升级 dsh 到 0.2.2-rc.3 之后，`curl http://127.0.0.1:3080/health` 返回 **401** 而不是 200。
+后果是链式的：watchdog 的健康探测拿不到 200 ⇒ 认为 web 永久不健康 ⇒ 累计 5 次失败就重启 ⇒ 新一代 ⇒
+新 token ⇒ 再弹一个浏览器页签（正是 v0.1.31 刚堵掉的那个循环，只是触发码从 404 变成了 401）。
+同一时间 `dsh-daemon install/reinstall/uninstall` 也失效 —— CLI 用 `curl` POST `/dsh-daemon/command`，
+401 的响应体不是 JSON，`JSON.parse` 直接失败。
+
+**根因**：新版 web server 把路由的默认鉴权策略改成了 `required`：
+
+```js
+// packages/host/webserver/lib/index.js
+authPolicy(auth, request) { return typeof auth === 'function' ? auth(request) : auth ?? "required"; }
+// export type WebAuthPolicy = 'anonymous' | 'required' | 'deny';
+```
+
+本插件注册的三条路由**全部**是给不带 cookie 的调用方用的：
+
+| 路由 | 谁在调用 | 不带 cookie 的原因 |
+|---|---|---|
+| `GET /health` | watchdog 健康探测 | `fetch()` 不带浏览器 cookie |
+| `GET /dsh-daemon/activity` | watchdog 的 idle-window 探测 | 同上 |
+| `POST /dsh-daemon/command` | `dsh-daemon install/reinstall/uninstall` | CLI 用 `curl` |
+
+所以三条都必须退出围栏。修法是显式声明 `auth: 'anonymous'` —— 与核心 `authentication-token` 的
+`CONNECT_PATH`、`client/hmr`、`client/modules` 用的是同一个机制。
+
+命令路由额外加了一道 **CSRF 守卫**：浏览器跨站 POST 到 `127.0.0.1` 一定带 `Origin` 头，而 CLI 的
+`curl` 不带 —— 带 `Origin` 的请求一律 403。这样即使用户在别的网页上被诱导发 POST，也触发不了
+`install/uninstall`。（在 rc.3 之前这条路由本来就是匿名的，本次等于**恢复原状并把洞堵上**。）
+
+**回归测试** `test/health-route-auth.test.js`（秒级、纯源码断言，已进 `test` 与 `test:ci`）：
+扫描 `lib/index.js` 里每一处 `ws.register({...})`，要求**每条路由都显式声明 `auth`**，
+并单独钉住 `/health`（200 JSON + anonymous）、`/dsh-daemon/activity`（anonymous）、
+以及「源码里必须留着 0.2.2-rc.3 / authPolicy 的说明」——防止后来的人把这条 option 当冗余清掉。
+
+> 顺带记一个运维坑：`dsh-daemon` 的 CLI 包装脚本写在**当前 node 的 bin 目录**下（nvm 下是
+> `~/.nvm/versions/node/<ver>/bin/dsh-daemon`），所以**升级/切换 node 版本后该命令会消失**
+> （watchdog 本身还在，plist 也会在下次 install/reinstall 时指向新 node）。
+> 换 node 之后跑一次 `dsh_daemon_reinstall` 即可重建 CLI 与注册。
 
 ### v0.1.31 — `/health` 404 不再触发无限重启（也就不会每次重启弹一个页签）
 
