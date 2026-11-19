@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.33 | **0.1.x 与 0.2.x** | 修「home 解析只信 shell ⇒ 在 dsh 的受管 shell 环境下丢掉 `DSH_HOME`，watchdog 被写进 `$HOME/.dsh`」：`discover()` 与 `homeAndDshHome()` 都用 `echo ${DSH_HOME:-$HOME/.dsh}` 反查 home，而那条 shell 由 dsh 的 shell 工具托管、不保证继承插件进程的 env —— `docker build` 里实测：镜像 `ENV DSH_HOME=/data1/.dsh`（同进程 `DSH_DAEMON_NO_SYSTEM=1` 生效），却把 watchdog 写成 `/root/.dsh/daemon/watchdog.js`，构建期断言随之失败。现在 home 与 dshHome **优先取 `process.env`**（`HOME`/`USERPROFILE`、`DSH_HOME`），shell 只作兜底；`discover()` 不再另抄一份反查，统一走 `homeAndDshHome()`。新增 `test/home-env-preference.test.js`：让 mock shell 故意丢掉 `DSH_HOME`/`HOME`，断言 watchdog 仍落在进程 env 的 `$DSH_HOME` 下 |
 | 0.1.32 | **0.1.x 与 0.2.x** | 修「新版 dsh（首个含 `WebAuthPolicy` 的构建，即 `dsh-v0.2.2-rc.3` 之后的 master）起 `/health` 变 401 ⇒ daemon 认为 web 永远不健康 ⇒ 重启风暴」：新版 web server 把**所有注册路由**的默认 `WebAuthPolicy` 改成 `required`（`authPolicy(): auth ?? "required"`），而本插件的三条路由（`/health`、`/dsh-daemon/activity`、`/dsh-daemon/command`）都是给**不带 cookie** 的 watchdog / CLI 用的，于是全部 401 —— 健康探测永远失败、CLI 的 `install/reinstall/uninstall` 解析不到响应。现在三条路由显式声明 `auth: 'anonymous'`（与核心 `authentication-token` / `hmr` / `modules` 同一机制）；命令路由额外加了 CSRF 守卫（带 `Origin` 头的请求一律 403，CLI 的 curl 不带该头）。watchdog 侧同步补齐：v0.1.31 的「核心静态资源」判据此前只在 `/health` **404** 时生效，401 仍走重启路径 ⇒ 现在 `404 / 401 / 403` 一律纳入「dsh 活着但我们的路由不可用 ⇒ 重启无用」，5xx/超时仍按原阈值重启 |
 | 0.1.31 | **0.1.x 与 0.2.x** | 修「`/health` 404 ⇒ 无限重启 + 每次重启弹一个浏览器页签」：`/health` 是**本插件自己注册**的路由，目标 profile 里插件没激活（装错 profile／插件加载失败／该 profile 的 `cordis.yml` 没这条）时它恒 404，watchdog 于是每约 5 分钟重启一次、每次都是新的一代、按代节流又允许开一次浏览器 ⇒ 桌面隔一阵子冒一个页签。现在用**核心静态资源**做正向存活判据：`GET /manifest.webmanifest` 200（或 `/` 返回 200/301/302/401/403，即核心 auth fence 在应答）就说明 dsh 本体活着。`/health` 404 **且**核心活着 ⇒ 插件没在服务，重启装不回插件 ⇒ **停止重启**，写 `.daemon-pluginless`，日志与 `status`/`dsh_daemon_status` 都给出可操作原因（`dsh_daemon_reinstall`）；核心也死了（连不上/超时/全 404）⇒ 才按原策略重启 |
 | 0.1.30 | **0.1.x 与 0.2.x** | 修「`status` 里的 Web auth URL 永不刷新」：`dsh web` 的 token 行在插件 loader settle **之后**才打印，而 `/health` 早得多 —— 一次性 CLI（`restart`/`start`/`restart-pending`）在健康检查一过就 `process.exit()`，把 `seedWebAuth()` 的轮询定时器连根丢掉（不写 `.web-auth-url`、不打日志、连 90s 超时日志都没有），长驻 watchdog 又不补课，URL 就永久钉在上一代死 token 上，还标着 `valid while this web process runs`。现在：seed 链可 await（CLI 独立上限 `DSH_DAEMON_AUTH_WAIT`，默认 20s，到点正常退出并提示 not captured，由下一个健康 tick 补齐）；落盘本代日志锚点 `.dsh-web.logoffset`（旧代 token 永不当作 current，反向分块扫描 ≤8MB）；长驻 watchdog 每个健康 tick 自愈（每代一次、single-flight）；浏览器按**进程代**节流 `.web-auth-opened`；`dsh-daemon status` 与 `dsh_daemon_status` 两处只在 token 属于当前进程时才标 valid，否则明说 `stale` / `not captured yet`（工具侧此前根本没有这一行） |
@@ -258,10 +259,28 @@ DYNAMIC=1 node test/harness.js dsh_daemon_status # 动态沙箱模式
 node test/startup-grace.test.js                 # 启动宽限期：慢启动不被杀、超时才重启、优雅停止
 node test/logs-command.test.js                  # 10s tick 默认值 + dsh-daemon logs / 失败明细入口
 node test/restart-loop.test.js                  # 收养未托管实例 + 慢 /health 不再误杀
+node test/home-env-preference.test.js           # 受管 shell 丢 DSH_HOME 时 home 仍取进程 env
 node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更新失败分类
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.33 — home 解析只信 shell：dsh 的受管 shell 里 `DSH_HOME` 会丢，watchdog 写进 `$HOME/.dsh`
+
+**现场**（docker 镜像构建）：镜像里 `ENV DSH_HOME=/data1/.dsh`，构建期起 headless `dsh web` 再调
+`{"cmd":"install"}`，应答是 `ok:true` 但内容写着 `Wrote watchdog script: /root/.dsh/daemon/watchdog.js`。
+同一进程里 `DSH_DAEMON_NO_SYSTEM=1` 是生效的，所以不是 ENV 没设。
+
+**根因**：`discover()` 与 `homeAndDshHome()` 都靠 **执行 shell** 反查 home（`echo ${DSH_HOME:-$HOME/.dsh}`）。
+那条 shell 走 dsh 的 `shell-env`（受管环境），不保证继承插件进程的 env ⇒ `DSH_HOME` 丢、`$HOME` 也丢，
+于是回落到一个错误目录（容器里是 `/root`，脱离环境时甚至会变成根 `/`，报 `mkdir '/.dsh/daemon'`）。
+
+**修法**：进程 env 优先 —— `home` 取 `HOME`/`USERPROFILE`，`dshHome` 取 `DSH_HOME`，都为空时才执行原来的 shell 兜底；
+`discover()` 里那份重复实现删掉，统一调用 `homeAndDshHome()`（这也是 install 真正走的那条路径）。
+
+**测试**：`test/home-env-preference.test.js` 用「故意丢掉 `DSH_HOME`/`HOME` 的 mock shell」复现受管环境，
+断言 watchdog 仍写在进程 env 的 `$DSH_HOME/daemon/`、且脚本里 baked 的 `DSH_HOME` 正确、不出现 `$HOME/.dsh`。
+把 env 优先去掉可稳定复现失败（`install 未抛异常` + `watchdog 写在 $DSH_HOME/daemon` 两条挂）。
 
 ### v0.1.32 — 新版 dsh 的 auth 围栏把 `/health` 变成 401（daemon 认为 web 永远不健康）
 
