@@ -29,6 +29,16 @@ const daemonDir = path.join(dshHome, 'daemon');
 const watchdogInDshHome = path.join(daemonDir, 'watchdog.js');
 const watchdogInHome = path.join(home, '.dsh', 'daemon', 'watchdog.js');
 const PORT = 3097;
+// 假 dsh CLI：CI 里没有真 dsh，install 会因 `dsh CLI not found on PATH` 直接失败
+// （本地能过只是因为开发机 PATH 里有 dsh —— 这正是这条用例第一版在 CI 挂掉的原因）。
+// 用一个符合真实布局的假包（lib/bin.js + package.json 带 version）走 DSH_DAEMON_DSH_BIN 覆盖：
+// discover() 的版本探测、realpath、baked 路径都与真实安装同路。
+const fakeDsh = path.join(tmp, 'fake-dsh');
+const fakeDshBin = path.join(fakeDsh, 'lib', 'bin.js');
+fs.mkdirSync(path.dirname(fakeDshBin), { recursive: true });
+fs.writeFileSync(fakeDshBin, '#!/usr/bin/env node\nconsole.log("fake dsh");\n', 'utf8');
+fs.writeFileSync(path.join(fakeDsh, 'package.json'),
+  JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.4' }, null, 2), 'utf8');
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -114,6 +124,7 @@ function killSpawned() {
       DSH_DAEMON_NO_SYSTEM: '1',
       DSH_DAEMON_CLI_DIR: path.join(tmp, 'bin'),
       DSH_DAEMON_AUTOREGEN: '0',
+      DSH_DAEMON_DSH_BIN: fakeDshBin,
     });
     fs.mkdirSync(home, { recursive: true });
 
@@ -122,6 +133,7 @@ function killSpawned() {
       encoding: 'utf8',
       env: (() => { const e = Object.assign({}, process.env); delete e.DSH_HOME; delete e.HOME; return e; })(),
     }).trim();
+    check('前提：DSH_DAEMON_DSH_BIN 指向的假 dsh 可用（不依赖 PATH 上的真 dsh）', fs.existsSync(fakeDshBin), fakeDshBin);
     check('前提：受管 shell 求值 ${DSH_HOME:-$HOME/.dsh} 会丢到别的目录',
       probeHome !== dshHome, probeHome);
 

@@ -265,6 +265,19 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
 
+### v0.1.33 补充 — `DSH_DAEMON_DSH_BIN`（显式指定 dsh 入口）
+
+`discover()` 找 dsh 的顺序是 `command -v dsh` → `npm root -g/@deepseek-ai/dsh/lib/bin.js`。
+容器或 CI 里 dsh 可能根本不在 PATH 上（dsh 由另一个工具安装、或装在非常规前缀），install 会报
+`dsh CLI not found on PATH`。现在可以显式指定：
+
+```bash
+DSH_DAEMON_DSH_BIN=/path/to/@deepseek-ai/dsh/lib/bin.js dsh-daemon install
+```
+
+指向不存在的位置会**退回**自动探测（不会静默用错路径）。测试 `test/home-env-preference.test.js`
+就是用它注入一个假 dsh 包的 —— 否则这条用例在 CI 上因「没有真 dsh」而失败（第一版正是这么挂的）。
+
 ### v0.1.33 — home 解析只信 shell：dsh 的受管 shell 里 `DSH_HOME` 会丢，watchdog 写进 `$HOME/.dsh`
 
 **现场**（docker 镜像构建）：镜像里 `ENV DSH_HOME=/data1/.dsh`，构建期起 headless `dsh web` 再调
