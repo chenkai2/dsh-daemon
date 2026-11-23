@@ -2,6 +2,7 @@
 
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
+| 0.1.35 | **0.1.x 与 0.2.x** | `status` / `dsh_daemon_status` 的健康行加 **uptime**：`Web server: ✅ healthy on 127.0.0.1:3080 (PID 90078) · up 2h 15m`。取的是本代 `WEB_STARTED`（每次 launch 与收养都会重置，所以它的年龄就是进程年龄），文件缺失（早期安装）时不显示，不编数字。两处共用同一个 `formatUptime()` 并按 `d`/`h`/`m`/`s` 取两级 |
 | 0.1.34 | **0.1.x 与 0.2.x** | 修 issue #9「插件升级自动生成新配置时没有复用安装时的端口，导致无限重启」：包升级后插件启动会按 `GEN_VERSION` 重生成 `watchdog.js`，那条路径把 `DEFAULT_PORT`（3080）当占位符传给了 `discover()`，而 `discover()` 里**显式 portArg 的优先级最高**（高过 `ctx.webServer.port`、`DSH_WEB_PORT`、默认值）⇒ 生成物被写成 `const PORT = 3080`、`.daemon-port` 也被覆写成 3080。装在非默认端口的用户于是被 watchdog 盯着一个没人在服务的端口 ⇒ 永远「不健康」⇒ 无限重启。现在重生成先读安装时写下的 `.daemon-port` 并原样复用；文件缺失/不可读（早期版本装的）才交给 `discover()` 从运行中的 web 推断，而不是猜 3080。**已中招的安装需显式 `dsh_daemon_reinstall port=<真实端口>`** |
 | 0.1.33 | **0.1.x 与 0.2.x** | 修「home 解析只信 shell ⇒ 在 dsh 的受管 shell 环境下丢掉 `DSH_HOME`，watchdog 被写进 `$HOME/.dsh`」：`discover()` 与 `homeAndDshHome()` 都用 `echo ${DSH_HOME:-$HOME/.dsh}` 反查 home，而那条 shell 由 dsh 的 shell 工具托管、不保证继承插件进程的 env —— `docker build` 里实测：镜像 `ENV DSH_HOME=/data1/.dsh`（同进程 `DSH_DAEMON_NO_SYSTEM=1` 生效），却把 watchdog 写成 `/root/.dsh/daemon/watchdog.js`，构建期断言随之失败。现在 home 与 dshHome **优先取 `process.env`**（`HOME`/`USERPROFILE`、`DSH_HOME`），shell 只作兜底；`discover()` 不再另抄一份反查，统一走 `homeAndDshHome()`。新增 `test/home-env-preference.test.js`：让 mock shell 故意丢掉 `DSH_HOME`/`HOME`，断言 watchdog 仍落在进程 env 的 `$DSH_HOME` 下 |
 | 0.1.32 | **0.1.x 与 0.2.x** | 修「新版 dsh（首个含 `WebAuthPolicy` 的构建，即 `dsh-v0.2.2-rc.3` 之后的 master）起 `/health` 变 401 ⇒ daemon 认为 web 永远不健康 ⇒ 重启风暴」：新版 web server 把**所有注册路由**的默认 `WebAuthPolicy` 改成 `required`（`authPolicy(): auth ?? "required"`），而本插件的三条路由（`/health`、`/dsh-daemon/activity`、`/dsh-daemon/command`）都是给**不带 cookie** 的 watchdog / CLI 用的，于是全部 401 —— 健康探测永远失败、CLI 的 `install/reinstall/uninstall` 解析不到响应。现在三条路由显式声明 `auth: 'anonymous'`（与核心 `authentication-token` / `hmr` / `modules` 同一机制）；命令路由额外加了 CSRF 守卫（带 `Origin` 头的请求一律 403，CLI 的 curl 不带该头）。watchdog 侧同步补齐：v0.1.31 的「核心静态资源」判据此前只在 `/health` **404** 时生效，401 仍走重启路径 ⇒ 现在 `404 / 401 / 403` 一律纳入「dsh 活着但我们的路由不可用 ⇒ 重启无用」，5xx/超时仍按原阈值重启 |
@@ -265,6 +266,21 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.35 — 健康行显示 uptime
+
+```
+   Web server: ✅ healthy on 127.0.0.1:3080 (PID 90078) · up 2h 15m
+```
+
+- 取本代 `.dsh-web.started`：每次 launch 与**收养**（`startAdoptedGeneration()`）都会重置它，所以它的年龄
+  就是当前 dsh web 进程的年龄；文件缺失（早期安装/被清掉）时**不显示**，不猜一个数字。
+- 格式按量级取两级：`3d 4h` / `2h 15m` / `12m 30s` / `45s`。
+- 模板 `printStatus()` 与插件 `doStatus()` 共用同一个 `formatUptime()`（同样靠 `toString()` 注入生成脚本），
+  避免两处漂移。
+- 测试：`test/web-auth-refresh.test.js` 在 `--restart` 之后断言健康行匹配
+  `✅ healthy on 127.0.0.1:<port> (PID <pid>) · up <n>s`（新一代必须是秒级，不能借用上一代的时间），
+  并断言两处健康行都调用同一个 `formatUptime`、且它确实被注入生成物。
 
 ### v0.1.34 — 升级后重生成脚本不再把端口改回 3080（issue #9）
 

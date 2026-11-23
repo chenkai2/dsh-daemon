@@ -2,6 +2,7 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
+| 0.1.35 | **0.1.x and 0.2.x** | The healthy line in `status` / `dsh_daemon_status` now carries **uptime**: `Web server: ✅ healthy on 127.0.0.1:3080 (PID 90078) · up 2h 15m`. It comes from this generation's `WEB_STARTED` (reset by every launch and by adoption, so its age is the process age); when the file is missing (older installs) the suffix is omitted rather than invented. Both surfaces share one `formatUptime()` and pick two units (`d`/`h`/`m`/`s`) |
 | 0.1.34 | **0.1.x and 0.2.x** | Fixes issue #9 "an upgrade regenerates the config without reusing the install port, causing endless restarts": after a package upgrade the plugin regenerates `watchdog.js` from `GEN_VERSION`, and that path forwarded the `DEFAULT_PORT` (3080) placeholder to `discover()` — where **an explicit portArg outranks every other source** (`ctx.webServer.port`, `DSH_WEB_PORT`, the default). The generated script was therefore written with `const PORT = 3080` and `.daemon-port` was overwritten too. Anyone installed on a non-default port got a watchdog watching a port nothing served: permanently "unhealthy", restarting forever. Regeneration now reuses the `.daemon-port` written at install time, and only when that file is missing/unreadable (older installs) does it let `discover()` infer the live port instead of guessing 3080. **Installs that already hit this need an explicit `dsh_daemon_reinstall port=<yours>`** |
 | 0.1.33 | **0.1.x and 0.2.x** | Fixes "home resolution trusted the shell only ⇒ under dsh's managed shell `DSH_HOME` was lost and the watchdog was written into `$HOME/.dsh`": both `discover()` and `homeAndDshHome()` reverse-looked the home with `echo ${DSH_HOME:-$HOME/.dsh}`, but that shell is hosted by dsh's shell tool and does not guarantee the plugin process's env — reproduced inside `docker build`. Home resolution now prefers the process env (see the Chinese changelog for the full write-up) |
 | 0.1.32 | **0.1.x and 0.2.x** | Fixes "since the newer dsh build (the first one carrying `WebAuthPolicy`, i.e. master after the `dsh-v0.2.2-rc.3` tag) `/health` answers 401 ⇒ the daemon thinks the web is never healthy ⇒ restart storm": the new web server defaults **every registered route** to `WebAuthPolicy 'required'` (`authPolicy(): auth ?? "required"`), and all three routes this plugin owns (`/health`, `/dsh-daemon/activity`, `/dsh-daemon/command`) are called by **cookie-less** clients — so all of them became 401: the health probe could never succeed, and the CLI's `install/reinstall/uninstall` got a non-JSON body. They now declare `auth: 'anonymous'` (the same opt-out core `authentication-token` / `hmr` / `modules` use); the command route additionally rejects any request carrying an `Origin` header as a CSRF guard (the CLI's curl sends none). The watchdog side is fixed too: v0.1.31's "core static asset" criterion only fired on `/health` **404**, so a 401 still took the restart path — `404 / 401 / 403` now all mean "dsh is alive but our route is unusable, so a restart cannot help", while 5xx / timeouts keep the original restart policy |
@@ -327,6 +328,22 @@ node test/logs-command.test.js                  # 10s tick default + dsh-daemon 
 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
+
+### v0.1.35 — uptime on the healthy line
+
+```
+   Web server: ✅ healthy on 127.0.0.1:3080 (PID 90078) · up 2h 15m
+```
+
+- Source is this generation's `.dsh-web.started` — reset by every launch and by **adoption**
+  (`startAdoptedGeneration()`), so its age is the age of the running dsh web process. If the file is missing
+  (older install or cleaned state) the suffix is omitted instead of guessing.
+- Two units by magnitude: `3d 4h` / `2h 15m` / `12m 30s` / `45s`.
+- The template's `printStatus()` and the plugin's `doStatus()` share one `formatUptime()` (injected into the
+  generated script via `toString()`), so the two surfaces cannot drift.
+- Test: `test/web-auth-refresh.test.js` asserts, right after a `--restart`, that the healthy line matches
+  `✅ healthy on 127.0.0.1:<port> (PID <pid>) · up <n>s` (a fresh generation must read in seconds, never
+  inherit the previous generation's time) and that both call sites use the shared formatter.
 
 ### v0.1.34 — regeneration no longer rewrites the port back to 3080 (issue #9)
 
