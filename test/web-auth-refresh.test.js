@@ -321,6 +321,20 @@ function makeCtx(registered) {
     // one-shot `--restart` (no resident watchdog anywhere) produces it too.
     // This is what keeps `.web-auth-opened` from being an ensureWebAuth-only
     // side effect that the CLI path silently skips.
+    // The healthy line now carries the web's own uptime. WEB_STARTED is written by
+    // this launch, so a fresh generation must read in seconds — not minutes, and
+    // certainly not a value borrowed from a previous generation.
+    const aStatus = await runCli(['--status'], {}, 40000);
+    check('A 健康行带 uptime（`· up <duration>`，取自本代 WEB_STARTED）',
+      /✅ healthy on 127\.0\.0\.1:\d+ \(PID \d+\) · up \d+s/.test(aStatus.out),
+      brief(aStatus.out, 6));
+    // Both surfaces must share the formatter (one wording, injected via toString()).
+    const pluginSrc = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'index.js'), 'utf8');
+    const upCallSites = (pluginSrc.match(/\+ upTxt\)/g) || []).length;
+    check('A 模板与插件两处健康行共用 formatUptime（没有各写一份）',
+      upCallSites === 2 && /formatUptime\.toString\(\)/.test(pluginSrc),
+      'call sites=' + upCallSites);
+
     await waitFor(() => readDaemon('.web-auth-opened').trim() !== '', 5000);
     // openBrowser spawns `open` detached, so its counter line can land a moment
     // after the CLI exits — wait for THIS generation's open, never for "> 0".
