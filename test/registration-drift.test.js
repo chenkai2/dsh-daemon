@@ -22,6 +22,17 @@ const daemonDir = path.join(dshHome, 'daemon');
 const watchdogJs = path.join(daemonDir, 'watchdog.js');
 const plist = path.join(home, 'Library', 'LaunchAgents', 'com.deepseek-ai.dsh-watchdog.plist');
 const watchdogLog = path.join(daemonDir, 'logs', 'watchdog.log');
+// A fake dsh CLI so this file also runs where nothing is on PATH (CI). `discover()`
+// prefers DSH_DAEMON_DSH_BIN, so a realistic layout (lib/bin.js + a package.json
+// with a version) exercises the same version probe, realpath and baked-path code
+// as a real install. Without this the file only passed on the dev machine, which
+// is exactly how its first CI run failed.
+const fakeDsh = path.join(tmp, 'fake-dsh');
+const fakeDshBin = path.join(fakeDsh, 'lib', 'bin.js');
+fs.mkdirSync(path.dirname(fakeDshBin), { recursive: true });
+fs.writeFileSync(fakeDshBin, '#!/usr/bin/env node\nconsole.log("fake dsh");\n', 'utf8');
+fs.writeFileSync(path.join(fakeDsh, 'package.json'),
+  JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.4' }, null, 2), 'utf8');
 const TRUSTED = 'chenkai2-dsh.e.weibo.com';
 const PORT = 3099;
 
@@ -104,6 +115,7 @@ function killSpawned() {
       HOME: home, DSH_HOME: dshHome, DSH_DAEMON_NO_SYSTEM: '1',
       DSH_DAEMON_CLI_DIR: path.join(tmp, 'bin'), DSH_DAEMON_AUTOREGEN: '0',
       DSH_DAEMON_TRUSTED_HOST: TRUSTED,
+      DSH_DAEMON_DSH_BIN: fakeDshBin,
     });
     fs.mkdirSync(home, { recursive: true });
 
@@ -126,6 +138,11 @@ function killSpawned() {
       script.indexOf('DSH_DAEMON_TRUSTED_HOST || "' + TRUSTED + '"') !== -1);
     check('GEN_VERSION 与 package.json 一致',
       script.indexOf('const GEN_VERSION = "' + require(path.join(root, 'package.json')).version + '"') !== -1);
+    // Proves the FAKE CLI is what discover() baked — otherwise this file silently
+    // depends on PATH again and only fails in CI.
+    check('DSH_BIN 来自 DSH_DAEMON_DSH_BIN 假包（不依赖 PATH 上真有 dsh）',
+      script.indexOf(fakeDshBin) !== -1,
+      'baked=' + ((script.match(/const DSH_BIN = "([^"]*)"/) || [])[1] || '<none>'));
     check('注册指向当前 watchdog 路径（基线）',
       fs.readFileSync(plist, 'utf8').indexOf('<string>' + watchdogJs + '</string>') !== -1);
 
