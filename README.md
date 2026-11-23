@@ -3,6 +3,7 @@
 | dsh-daemon | 支撑的 dsh | 说明 |
 |---|---|---|
 | 0.1.32 | **0.1.x 与 0.2.x** | 修「新版 dsh（首个含 `WebAuthPolicy` 的构建，即 `dsh-v0.2.2-rc.3` 之后的 master）起 `/health` 变 401 ⇒ daemon 认为 web 永远不健康 ⇒ 重启风暴」：新版 web server 把**所有注册路由**的默认 `WebAuthPolicy` 改成 `required`（`authPolicy(): auth ?? "required"`），而本插件的三条路由（`/health`、`/dsh-daemon/activity`、`/dsh-daemon/command`）都是给**不带 cookie** 的 watchdog / CLI 用的，于是全部 401 —— 健康探测永远失败、CLI 的 `install/reinstall/uninstall` 解析不到响应。现在三条路由显式声明 `auth: 'anonymous'`（与核心 `authentication-token` / `hmr` / `modules` 同一机制）；命令路由额外加了 CSRF 守卫（带 `Origin` 头的请求一律 403，CLI 的 curl 不带该头）。watchdog 侧同步补齐：v0.1.31 的「核心静态资源」判据此前只在 `/health` **404** 时生效，401 仍走重启路径 ⇒ 现在 `404 / 401 / 403` 一律纳入「dsh 活着但我们的路由不可用 ⇒ 重启无用」，5xx/超时仍按原阈值重启 |
+| 0.1.33 | **0.1.x 与 0.2.x** | 修 issue #9「插件升级自动生成新配置时没有复用安装时的端口，导致无限重启」：包升级后插件启动时会按 `GEN_VERSION` 重生成 `watchdog.js`，那条路径把 `DEFAULT_PORT`（3080）当占位符传给了 `discover()`，而 `discover()` 里**显式 portArg 的优先级最高**（高过 `ctx.webServer.port`、`DSH_WEB_PORT`、默认值）⇒ 生成物里被写成 `const PORT = 3080`、`.daemon-port` 也被覆写成 3080。装在非默认端口的用户于是被 watchdog 盯着一个没人在服务的端口 ⇒ 永远「不健康」⇒ 无限重启。现在重生成先读安装时写下的 `.daemon-port` 并原样复用；文件缺失/不可读（早期版本装的）才交给 `discover()` 从运行中的 web 推断，而不是猜 3080 |
 | 0.1.31 | **0.1.x 与 0.2.x** | 修「`/health` 404 ⇒ 无限重启 + 每次重启弹一个浏览器页签」：`/health` 是**本插件自己注册**的路由，目标 profile 里插件没激活（装错 profile／插件加载失败／该 profile 的 `cordis.yml` 没这条）时它恒 404，watchdog 于是每约 5 分钟重启一次、每次都是新的一代、按代节流又允许开一次浏览器 ⇒ 桌面隔一阵子冒一个页签。现在用**核心静态资源**做正向存活判据：`GET /manifest.webmanifest` 200（或 `/` 返回 200/301/302/401/403，即核心 auth fence 在应答）就说明 dsh 本体活着。`/health` 404 **且**核心活着 ⇒ 插件没在服务，重启装不回插件 ⇒ **停止重启**，写 `.daemon-pluginless`，日志与 `status`/`dsh_daemon_status` 都给出可操作原因（`dsh_daemon_reinstall`）；核心也死了（连不上/超时/全 404）⇒ 才按原策略重启 |
 | 0.1.30 | **0.1.x 与 0.2.x** | 修「`status` 里的 Web auth URL 永不刷新」：`dsh web` 的 token 行在插件 loader settle **之后**才打印，而 `/health` 早得多 —— 一次性 CLI（`restart`/`start`/`restart-pending`）在健康检查一过就 `process.exit()`，把 `seedWebAuth()` 的轮询定时器连根丢掉（不写 `.web-auth-url`、不打日志、连 90s 超时日志都没有），长驻 watchdog 又不补课，URL 就永久钉在上一代死 token 上，还标着 `valid while this web process runs`。现在：seed 链可 await（CLI 独立上限 `DSH_DAEMON_AUTH_WAIT`，默认 20s，到点正常退出并提示 not captured，由下一个健康 tick 补齐）；落盘本代日志锚点 `.dsh-web.logoffset`（旧代 token 永不当作 current，反向分块扫描 ≤8MB）；长驻 watchdog 每个健康 tick 自愈（每代一次、single-flight）；浏览器按**进程代**节流 `.web-auth-opened`；`dsh-daemon status` 与 `dsh_daemon_status` 两处只在 token 属于当前进程时才标 valid，否则明说 `stale` / `not captured yet`（工具侧此前根本没有这一行） |
 | 0.1.29 | **0.1.x 与 0.2.x** | 自动更新加 dsh 兼容门禁：每版在 `package.json` 声明 `dsh.requires.dsh`，更新前比对客户端已装 dsh 版本，**不满足/未声明/读不到就跳过自动升级**（`dsh-daemon update --apply` 可人工强制）；更新检查改为 2 次尝试 + 15s 预算，错误细分为 timeout / DNS / HTTP / 连接失败，status 显示上次成功检查时间 |
@@ -262,6 +263,32 @@ node test/update-gate.test.js                   # dsh 兼容区间门禁 + 更�
 ```
 
 测试驱动运行真实插件代码（真实 bash/fs），并真实调用工具。
+
+### v0.1.33 — 升级后重生成脚本不再把端口改回 3080（issue #9）
+
+**现场**（issue #9，装非默认端口的用户）：插件升级后「无限重启」。
+
+**根因**：包升级后插件启动会调 `regenerateWatchdogIfStale()` 重写 `watchdog.js`，那段代码先用
+`cfg = { …, port: DEFAULT_PORT }` 算 `paths()`，然后把 **`cfg.port` 当 portArg 传给了 `discover()`**。
+而 `discover()` 的端口解析顺序是「默认值 → `ctx.webServer.port` → `DSH_WEB_PORT` → **显式 portArg 最高**」，
+于是占位符 3080 把真实端口全部压掉：
+
+```js
+let port = DEFAULT_PORT;
+if (ctx.webServer.port valid) port = ctx.webServer.port;   // 真实端口
+if (DSH_WEB_PORT valid) port = envPort;                    // 真实端口
+if (portArg valid) port = portArg;                         // ← 3080 占位符赢
+```
+
+生成物里写成 `const PORT = 3080;`，`.daemon-port` 也被覆写成 3080，watchdog 从此盯着一个没人在服务的端口 ⇒
+永远「不健康」⇒ 按阈值无限重启（每代还会弹一次浏览器页签）。
+
+**修法**：重生成先读安装/重装时写下的 `.daemon-port` 并**原样复用**；文件缺失或不可读（早期版本装的）时传
+`undefined`，让 `discover()` 从运行中的 `ctx.webServer.port` 推断，而不是猜 3080。
+
+**回归测试** `test/registration-drift.test.js` 新增 **F5/F5b**：把生成物的 `GEN_VERSION` 改成一个旧值以强制重生成，
+再走一次插件启动，断言（a）脚本里仍是 `const PORT = <安装端口>`、不是 3080，（b）`.daemon-port` 没被改。
+修复前该用例实测红：`portLine=const PORT = 3080;` / `portFile=3080`。
 
 ### v0.1.32 — 新版 dsh 的 auth 围栏把 `/health` 变成 401（daemon 认为 web 永远不健康）
 
