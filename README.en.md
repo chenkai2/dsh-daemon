@@ -2,7 +2,8 @@
 
 | dsh-daemon | Supported dsh | Notes |
 |---|---|---|
-| 0.1.33 | **0.1.x and 0.2.x** | Fixes issue #9 "an upgrade regenerates the config without reusing the install port, causing endless restarts": after a package upgrade the plugin regenerates `watchdog.js` from `GEN_VERSION`, and that path forwarded the `DEFAULT_PORT` (3080) placeholder to `discover()` — where **an explicit portArg outranks every other source** (`ctx.webServer.port`, `DSH_WEB_PORT`, the default). The generated script was therefore written with `const PORT = 3080` and `.daemon-port` was overwritten too. Anyone installed on a non-default port got a watchdog watching a port nothing served: permanently "unhealthy", restarting forever. Regeneration now reuses the `.daemon-port` written at install time, and only when that file is missing/unreadable (older installs) does it let `discover()` infer the live port instead of guessing 3080 |
+| 0.1.34 | **0.1.x and 0.2.x** | Fixes issue #9 "an upgrade regenerates the config without reusing the install port, causing endless restarts": after a package upgrade the plugin regenerates `watchdog.js` from `GEN_VERSION`, and that path forwarded the `DEFAULT_PORT` (3080) placeholder to `discover()` — where **an explicit portArg outranks every other source** (`ctx.webServer.port`, `DSH_WEB_PORT`, the default). The generated script was therefore written with `const PORT = 3080` and `.daemon-port` was overwritten too. Anyone installed on a non-default port got a watchdog watching a port nothing served: permanently "unhealthy", restarting forever. Regeneration now reuses the `.daemon-port` written at install time, and only when that file is missing/unreadable (older installs) does it let `discover()` infer the live port instead of guessing 3080. **Installs that already hit this need an explicit `dsh_daemon_reinstall port=<yours>`** |
+| 0.1.33 | **0.1.x and 0.2.x** | Fixes "home resolution trusted the shell only ⇒ under dsh's managed shell `DSH_HOME` was lost and the watchdog was written into `$HOME/.dsh`": both `discover()` and `homeAndDshHome()` reverse-looked the home with `echo ${DSH_HOME:-$HOME/.dsh}`, but that shell is hosted by dsh's shell tool and does not guarantee the plugin process's env — reproduced inside `docker build`. Home resolution now prefers the process env (see the Chinese changelog for the full write-up) |
 | 0.1.32 | **0.1.x and 0.2.x** | Fixes "since the newer dsh build (the first one carrying `WebAuthPolicy`, i.e. master after the `dsh-v0.2.2-rc.3` tag) `/health` answers 401 ⇒ the daemon thinks the web is never healthy ⇒ restart storm": the new web server defaults **every registered route** to `WebAuthPolicy 'required'` (`authPolicy(): auth ?? "required"`), and all three routes this plugin owns (`/health`, `/dsh-daemon/activity`, `/dsh-daemon/command`) are called by **cookie-less** clients — so all of them became 401: the health probe could never succeed, and the CLI's `install/reinstall/uninstall` got a non-JSON body. They now declare `auth: 'anonymous'` (the same opt-out core `authentication-token` / `hmr` / `modules` use); the command route additionally rejects any request carrying an `Origin` header as a CSRF guard (the CLI's curl sends none). The watchdog side is fixed too: v0.1.31's "core static asset" criterion only fired on `/health` **404**, so a 401 still took the restart path — `404 / 401 / 403` now all mean "dsh is alive but our route is unusable, so a restart cannot help", while 5xx / timeouts keep the original restart policy |
 | 0.1.31 | **0.1.x and 0.2.x** | Fixes "`/health` 404 ⇒ endless restarts, and one browser tab per restart": `/health` is a route **this plugin registers itself**, so when the plugin is not active in the profile the daemon launches (wrong profile / failed activation / missing entry in that profile's `cordis.yml`) it is always 404 — and the watchdog then restarts roughly every 5 minutes, each restart being a new generation, which the per-generation throttle lets open one browser tab again. Liveness is now decided by a **core** static asset: `GET /manifest.webmanifest` returns 200 (or `/` returns 200/301/302/401/403, i.e. the core auth fence answers) ⇒ dsh itself is alive. `/health` 404 **and** core alive ⇒ the plugin is not serving and a restart cannot load it ⇒ **stop restarting**, record `.daemon-pluginless`, and make both `status` and the `dsh_daemon_status` tool state the actionable cause (`dsh_daemon_reinstall`); core dead too (refused/timeout/all-404) ⇒ the original restart policy applies |
 | 0.1.30 | **0.1.x and 0.2.x** | Fixes "the Web auth URL in `status` never changes": `dsh web` prints its token line only **after the plugin loader settles**, while `/health` answers much earlier — so a one-shot CLI (`restart`/`start`/`restart-pending`) called `process.exit()` the moment the health probe returned and dropped `seedWebAuth()`'s polling timers (no `.web-auth-url` write, no log line, not even the 90 s timeout line), and the resident watchdog never re-seeded; the URL stayed pinned to a dead token yet was still labelled `valid while this web process runs`. Now: the seed chain is awaitable (bounded per CLI invocation via `DSH_DAEMON_AUTH_WAIT`, seconds, default 20, then it exits with a `not captured yet` note and the next healthy tick fills it in); a per-generation log anchor `.dsh-web.logoffset` keeps older tokens out of "current" (backwards chunked scan, ≤8 MB); the resident watchdog self-heals the URL on every healthy tick (once per generation, single-flight); the browser is throttled per **web generation** via `.web-auth-opened`; both `dsh-daemon status` and the `dsh_daemon_status` tool only claim `valid` for the running process and otherwise report `stale` / `not captured yet` (the tool had no such line at all) |
@@ -327,14 +328,14 @@ node test/logs-command.test.js                  # 10s tick default + dsh-daemon 
 The harness runs the real plugin code with real bash/fs and invokes the tool
 for real.
 
-### v0.1.33 — regeneration no longer rewrites the port back to 3080 (issue #9)
+### v0.1.34 — regeneration no longer rewrites the port back to 3080 (issue #9)
 
 **Symptom** (issue #9, users installed on a non-default port): endless restarts after a plugin upgrade.
 
-**Root cause**: on boot the plugin calls `regenerateWatchdogIfStale()` to rewrite `watchdog.js`. That code computed
-`paths()` from `cfg = { …, port: DEFAULT_PORT }` and then passed **`cfg.port` as `discover()`'s portArg**. But
-`discover()` resolves the port as "default → `ctx.webServer.port` → `DSH_WEB_PORT` → **explicit portArg wins**",
-so the 3080 placeholder overrode the real port:
+**Root cause**: on boot the plugin calls `regenerateWatchdogIfStale()` to rewrite `watchdog.js`. That code computed `paths()`
+from `cfg = { …, port: DEFAULT_PORT }` and then passed **`cfg.port` as `discover()`'s portArg**. But `discover()` resolves
+the port as "default → `ctx.webServer.port` → `DSH_WEB_PORT` → **explicit portArg wins**", so the 3080 placeholder
+overrode the real port:
 
 ```js
 let port = DEFAULT_PORT;
@@ -343,23 +344,23 @@ if (DSH_WEB_PORT valid) port = envPort;                    // real port
 if (portArg valid) port = portArg;                         // ← the 3080 placeholder wins
 ```
 
-The generated script was written with `const PORT = 3080;`, `.daemon-port` was overwritten with 3080, and the
-watchdog spent every tick health-checking a port nothing served — permanently "unhealthy", restarting forever
-(one browser tab per generation).
+The generated script was written with `const PORT = 3080;`, `.daemon-port` was overwritten with 3080, and the watchdog spent
+every tick health-checking a port nothing served — permanently "unhealthy", restarting forever (one browser tab per
+generation).
 
-**Fix**: regeneration reads the `.daemon-port` written by install/reinstall and reuses it verbatim; only when that
-file is missing or unreadable (installs made before it existed) does it pass `undefined` so `discover()` infers the
-live port from `ctx.webServer.port` rather than guessing 3080.
+**Fix**: regeneration reads the `.daemon-port` written by install/reinstall and reuses it verbatim; only when that file is
+missing or unreadable (installs made before it existed) does it pass `undefined` so `discover()` infers the live port from
+`ctx.webServer.port` rather than guessing 3080. `doStart()` was aligned to the same source (it used to probe `.daemon-port`
+but launch on `discover().port`), and the port check is now integer-only.
 
-**Regression test** `test/registration-drift.test.js` gained **F5/F5b**: force a regeneration by rewriting the
-script's `GEN_VERSION` to an old value, boot the plugin again, then assert (a) the script still carries
+**Regression test** `test/registration-drift.test.js` gained **F5/F5b** (now part of `test:ci`): force a regeneration by
+rewriting the script's `GEN_VERSION` to an old value, boot the plugin again, then assert (a) the script still carries
 `const PORT = <install port>` rather than 3080, and (b) `.daemon-port` was not mutated. Both were red before the fix
 (`portLine=const PORT = 3080;`, `portFile=3080`).
 
-> **An install that already hit this does not heal by itself**: 0.1.32 and earlier had already rewritten
-> `.daemon-port` to 3080 through the same regeneration path, and 0.1.33 reuses that value faithfully. Such a
-> machine needs one explicit reinstall with the real port:
-> `dsh_daemon_reinstall port=<yours>` (or `DSH_WEB_PORT=<port> dsh-daemon reinstall`);
+> **An install that already hit this does not heal by itself**: older versions had already rewritten `.daemon-port` to 3080
+> through the same regeneration path, and this release reuses that value faithfully. Such a machine needs one explicit
+> reinstall with the real port: `dsh_daemon_reinstall port=<yours>` (or `DSH_WEB_PORT=<port> dsh-daemon reinstall`);
 > only then is `.daemon-port` corrected.
 
 ### v0.1.32 — the newer dsh auth fence turned `/health` into a 401 (the daemon thought the web was never healthy)
