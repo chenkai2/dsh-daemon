@@ -33,6 +33,7 @@ fs.mkdirSync(path.dirname(fakeDshBin), { recursive: true });
 fs.writeFileSync(fakeDshBin, '#!/usr/bin/env node\nconsole.log("fake dsh");\n', 'utf8');
 fs.writeFileSync(path.join(fakeDsh, 'package.json'),
   JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.4' }, null, 2), 'utf8');
+const IS_MAC = process.platform === 'darwin';
 const TRUSTED = 'chenkai2-dsh.e.weibo.com';
 const PORT = 3099;
 
@@ -129,7 +130,12 @@ function killSpawned() {
     killSpawned();
 
     check('安装生成了 watchdog 脚本', fs.existsSync(watchdogJs));
-    check('安装生成了 LaunchAgent plist', fs.existsSync(plist));
+    // Service registration is platform-specific (LaunchAgent here, a systemd unit
+    // on Linux), and this file now runs in CI on ubuntu-latest. Only the macOS
+    // registration assertions below are gated; the issue-#9 guard (F5/F5b) is
+    // platform-independent and always runs.
+    if (IS_MAC) check('安装生成了 LaunchAgent plist', fs.existsSync(plist));
+    else console.log('  [skip] LaunchAgent plist（非 macOS，注册面由 systemd 承担）');
     const script = fs.readFileSync(watchdogJs, 'utf8');
 
     // F4: the install-time trusted host is embedded, not only read from the
@@ -143,6 +149,7 @@ function killSpawned() {
     check('DSH_BIN 来自 DSH_DAEMON_DSH_BIN 假包（不依赖 PATH 上真有 dsh）',
       script.indexOf(fakeDshBin) !== -1,
       'baked=' + ((script.match(/const DSH_BIN = "([^"]*)"/) || [])[1] || '<none>'));
+    if (IS_MAC) {
     check('注册指向当前 watchdog 路径（基线）',
       fs.readFileSync(plist, 'utf8').indexOf('<string>' + watchdogJs + '</string>') !== -1);
 
@@ -166,6 +173,9 @@ function killSpawned() {
 
     const healed = execFileSync('node', [watchdogJs, '--status'], { encoding: 'utf8' });
     check('F3 自愈后 status 不再报 stale', !/Registration:\s*❌\s*stale/.test(healed));
+    } else {
+      console.log('  [skip] F3/F2 注册自愈（仅 macOS：断言对象是 LaunchAgent plist）');
+    }
 
     // ---- F5 (issue #9): an upgrade-triggered regeneration must REUSE the
     // install port. discover() lets an explicit portArg win over every other
