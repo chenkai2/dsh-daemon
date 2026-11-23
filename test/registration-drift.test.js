@@ -149,6 +149,31 @@ function killSpawned() {
 
     const healed = execFileSync('node', [watchdogJs, '--status'], { encoding: 'utf8' });
     check('F3 自愈后 status 不再报 stale', !/Registration:\s*❌\s*stale/.test(healed));
+
+    // ---- F5 (issue #9): an upgrade-triggered regeneration must REUSE the
+    // install port. discover() lets an explicit portArg win over every other
+    // source (env, ctx.webServer.port, DEFAULT_PORT), and the boot hook used to
+    // pass DEFAULT_PORT as a harmless-looking placeholder while computing
+    // paths() — so the regenerated script baked 3080, health-checked a port the
+    // user never installed on, and restarted the web forever.
+    const ver = require(path.join(root, 'package.json')).version;
+    fs.writeFileSync(
+      path.join(daemonDir, 'watchdog.js'),
+      fs.readFileSync(path.join(daemonDir, 'watchdog.js'), 'utf8')
+        .replace(/const GEN_VERSION = "[^"]*"/, 'const GEN_VERSION = "0.0.0"'),
+      'utf8');
+    process.env.DSH_DAEMON_AUTOREGEN = '1';
+    await plugin.apply(makeCtx([]));                          // boot hook #3: stale => regenerate
+    const regenerated = await waitFor(
+      () => fs.readFileSync(watchdogJs, 'utf8').indexOf('const GEN_VERSION = "' + ver + '"') !== -1, 15000);
+    killSpawned();
+    const regenText = fs.readFileSync(watchdogJs, 'utf8');
+    check('F5 升级触发的重生成仍然复用安装时端口（不是 DEFAULT_PORT 3080）',
+      regenerated && regenText.indexOf('const PORT = ' + PORT + ';') !== -1,
+      'regenerated=' + regenerated + ' portLine=' + (regenText.match(/const PORT = \d+;/) || ['<none>'])[0]);
+    check('F5b 重生成没有把 .daemon-port 改成别的端口',
+      (fs.readFileSync(path.join(daemonDir, '.daemon-port'), 'utf8') || '').trim() === String(PORT),
+      'portFile=' + (fs.readFileSync(path.join(daemonDir, '.daemon-port'), 'utf8') || '').trim());
   } finally {
     killSpawned();
     try { execFileSync('/bin/bash', ['-c', 'chmod -R u+w ' + JSON.stringify(tmp) + ' 2>/dev/null; rm -rf ' + JSON.stringify(tmp)]); } catch (e) { /* best-effort */ }
@@ -156,5 +181,5 @@ function killSpawned() {
 
   console.log('');
   if (failures > 0) { console.error('registration-drift tests FAILED (' + failures + ')'); process.exit(1); }
-  console.log('registration-drift tests passed (F2 registration self-heal, F3 status honesty, F4 embedded trusted host)');
+  console.log('registration-drift tests passed (F2 registration self-heal, F3 status honesty, F4 embedded trusted host, F5 install port survives regeneration)');
 })().catch((e) => { console.error('registration-drift tests crashed: ' + (e && e.stack || e)); process.exit(1); });

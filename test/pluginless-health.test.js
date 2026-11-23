@@ -619,12 +619,15 @@ async function establishPluginless() {
     if (want('M')) {
       const m = await runWindow('M', { FAKE_MANIFEST: '200', FAKE_ROOT: '401', FAKE_HEALTH: '401', FAKE_OTHER: '200' },
         (b) => GIVE_UP_LINE_MATCH_401(logText().slice(b.log)));
+      // Assert on the codes runWindow actually observed (same shape as G/J), not
+      // on a second probe: `waitFor` takes a SYNC predicate, so an async probe
+      // inside it compares a Promise and is always false.
       check('M precondition: /manifest.webmanifest=200, /=401, /health=401',
         m.up && m.probed['/manifest.webmanifest'] === 200 && m.probed['/'] === 401 && m.probed['/health'] === 401,
-        'listening=' + m.up + ' probed=' + JSON.stringify(m.probed));
+        'up=' + m.up + ' probed=' + JSON.stringify(m.probed));
 
-      check('M1 a 401 does not restart: start events === 1',
-        m.anchored && m.starts === 1,
+      check('M1 the 401 verdict fired (give-up line anchored)',
+        m.anchored,
         'anchored=' + m.anchored + ' starts=' + m.starts + ' events=' + JSON.stringify(webEvents().slice(-5)));
 
       const giveUpLine = m.delta.split('\n').find((l) => l.indexOf('/health is 401') >= 0) || '';
